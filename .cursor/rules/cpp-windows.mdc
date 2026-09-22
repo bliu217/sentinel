@@ -1,0 +1,20 @@
+---
+description: C++20 / MSVC conventions for Sentinel (Win32 telemetry, RAII, thread-safety)
+globs: "**/*.{h,hpp,cpp}"
+alwaysApply: false
+---
+
+# Sentinel C++ (Windows)
+
+- C++20, MSVC (Visual Studio 2026 Build Tools). CMake is the build system; Ninja is the backend. Prefer the standard library; keep Win32 isolated in `telemetry/` collectors. Configure from a VS x64 developer environment (`vcvars64.bat`) so `cl` and the Windows SDK are on PATH. Use preset `windows-msvc-ninja`.
+- RAII only. No raw `new`/`delete`. Use `[[nodiscard]]` on functions whose result must not be ignored.
+- Define `WIN32_LEAN_AND_MEAN`, `UNICODE`, `_UNICODE`, and `NOMINMAX` at the target (CMake), not scattered in headers.
+- Convert `FILETIME` with shift/or, never pointer punning:
+
+```cpp
+const auto t = (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+```
+
+- Hot path (`collect()`): no heap, no logging. Shared mutable state uses `std::mutex` or `std::atomic`. Copy value types (`SystemSample`) out of the lock.
+- Counters (CPU times) become rates via delta vs the previous sample. Gauges (memory) are used as-is.
+- Kernel time from `GetSystemTimes` includes idle. Busy = kernel + user − idle.
