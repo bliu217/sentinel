@@ -32,6 +32,7 @@ namespace {
 }  // namespace
 
 std::optional<SystemSample> SystemCollector::collect() {
+    std::lock_guard lock(mutex_);
     RawCpuSample cpu{};
     if (!readCpuTimes(cpu)) {
         return std::nullopt;
@@ -45,7 +46,6 @@ std::optional<SystemSample> SystemCollector::collect() {
 
     const auto timestamp = std::chrono::system_clock::now();
 
-    std::lock_guard lock(mutex_);
     if (!previousCpu_.has_value()) {
         previousCpu_ = cpu;
         return std::nullopt;

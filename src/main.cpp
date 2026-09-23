@@ -55,13 +55,17 @@ void printSample(const sentinel::telemetry::SystemSample& sample) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc < 2 || std::string_view(argv[1]) != "start") {
+    if (argc != 2 || std::string_view(argv[1]) != "start") {
         printUsage();
         return 1;
     }
 
-    SetConsoleCtrlHandler(onConsoleCtrl, TRUE);
+    if (SetConsoleCtrlHandler(onConsoleCtrl, TRUE) == 0) {
+        std::cerr << "Failed to register console control handler\n";
+        return 1;
+    }
 
+    
     sentinel::telemetry::SystemCollector collector;
     using Clock = std::chrono::steady_clock;
     auto nextTick = Clock::now();
