@@ -11,11 +11,18 @@ endif()
 
 add_library(sentinel_telemetry STATIC
     src/telemetry/system_collector.cpp
+    src/telemetry/process_collector.cpp
+    src/telemetry/process_tracker.cpp
+    src/telemetry/process_aggregator.cpp
     src/storage/ring_buffer.cpp
+    src/storage/process_history.cpp
     src/storage/event_store.cpp
     src/detection/anomaly_detector.cpp
 )
 target_include_directories(sentinel_telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+if(WIN32)
+    target_link_libraries(sentinel_telemetry PUBLIC Psapi)
+endif()
 
 if(MSVC)
     target_compile_options(sentinel_telemetry PUBLIC /W4 /permissive-)
@@ -44,6 +51,7 @@ if(SENTINEL_BUILD_TESTS)
     enable_testing()
     add_executable(sentinel_tests
         tests/cpu_math_test.cpp
+        tests/process_telemetry_test.cpp
         tests/ring_buffer_test.cpp
         tests/anomaly_detector_test.cpp
         tests/event_store_test.cpp

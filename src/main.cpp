@@ -1,6 +1,9 @@
 #include "detection/anomaly_detector.h"
 #include "storage/event_store.h"
+#include "storage/process_history.h"
 #include "storage/ring_buffer.h"
+#include "telemetry/process_aggregator.h"
+#include "telemetry/process_collector.h"
 #include "telemetry/system_collector.h"
 
 #include <atomic>
@@ -41,7 +44,9 @@ int main(int argc, char* argv[]) {
     }
 
     sentinel::telemetry::SystemCollector collector;
+    sentinel::telemetry::ProcessCollector processCollector;
     sentinel::storage::RingBuffer samples(300);
+    sentinel::storage::ProcessHistory processHistory(300);
     sentinel::detection::AnomalyDetector detector;
     sentinel::storage::EventStore eventStore;
     using Clock = std::chrono::steady_clock;
@@ -53,6 +58,10 @@ int main(int argc, char* argv[]) {
             for (const auto& event : detector.analyze(*sample)) {
                 eventStore.append(event);
             }
+        }
+        if (auto processSnapshot = processCollector.collect()) {
+            processHistory.push(sentinel::telemetry::selectTopProcesses(
+                sentinel::telemetry::aggregateProcesses(*processSnapshot)));
         }
 
         nextTick += std::chrono::seconds(1);

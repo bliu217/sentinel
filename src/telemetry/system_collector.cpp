@@ -46,7 +46,7 @@ std::optional<SystemSample> SystemCollector::collect() {
         return std::nullopt;
     }
 
-    const auto timestamp = std::chrono::steady_clock::now();
+    const SampleTime time{std::chrono::steady_clock::now(), std::chrono::system_clock::now()};
 
     if (!previousCpu_.has_value()) {
         previousCpu_ = cpu;
@@ -57,10 +57,11 @@ std::optional<SystemSample> SystemCollector::collect() {
     previousCpu_ = cpu;
 
     return SystemSample{
-        .timestamp = timestamp,
+        .timestamp = time.steady,
         .cpuUsagePercent = usage,
         .memoryUsedBytes = memoryUsed,
         .memoryAvailableBytes = memoryAvailable,
+        .utcTimestamp = time.utc,
     };
 }
 

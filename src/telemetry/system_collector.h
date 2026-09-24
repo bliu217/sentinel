@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cpu_math.h"
+#include "sample_time.h"
 
 #include <chrono>
 #include <cstdint>
@@ -14,6 +15,7 @@ struct SystemSample {
     double cpuUsagePercent{};
     std::uint64_t memoryUsedBytes{};
     std::uint64_t memoryAvailableBytes{};
+    std::chrono::system_clock::time_point utcTimestamp{};
 };
 
 class SystemCollector {

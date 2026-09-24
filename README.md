@@ -51,6 +51,18 @@ v2 connected the collector, a 300-sample ring buffer, anomaly analysis, and an i
 
 The event stream makes additional metrics possible, including anomaly count, episode duration, maximum value during an episode, sampling-delay frequency, and percentage of monitored time under CPU or memory pressure. These summaries are not yet calculated or persisted.
 
+## v3
+
+v3 adds `ProcessCollector`, a separate Windows process sampler. Each tick, it enumerates accessible processes and records their executable name, PID plus creation time, CPU usage, working-set bytes, and private committed bytes. PID plus creation time distinguishes a new process from a reused PID. The first sighting of each process establishes a CPU baseline; memory is available immediately.
+
+Process CPU percentage is the change in its kernel-plus-user time divided by the change in machine-wide CPU time. This keeps process percentages on the same 0–100% scale as system CPU. A group reports CPU as pending when any member still needs a baseline. Failed process reads are skipped without stopping collection.
+
+The aggregator combines `Cursor.exe` processes into **Cursor** and `VmmemWSL.exe` or `vmmem.exe` into **WSL**. Other processes are grouped by executable name. It sums group CPU, working-set bytes, and private committed bytes. Working set is resident memory and may include shared pages, so summed group memory is an estimate rather than exclusive RAM ownership. WSL here refers to its Windows VM host process, not individual Linux processes.
+
+The monitor retains 300 process-group snapshots, with Cursor and WSL plus the top 10 groups by CPU and top 10 by working set per snapshot. A summary formatter can produce text such as “Cursor consumed 38.0% CPU and 2.0 GiB resident memory; WSL consumed 4.0% CPU and 6.0 GiB resident memory.” The current CLI still runs silently; the formatter is ready for a later GUI or query command.
+
+System and process samples now include a UTC timestamp for future persistence while keeping monotonic timestamps for elapsed-time calculations. No process history is persisted yet.
+
 ## Build
 
 Toolchain: Visual Studio 2026 Build Tools (`cl`), CMake, Ninja, Windows SDK. Run these from an x64 Developer Command Prompt so `cl` is on `PATH` (MSYS `g++` must not win).

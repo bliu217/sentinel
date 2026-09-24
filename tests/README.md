@@ -1,6 +1,6 @@
 # Tests
 
-v0 tests cover the pure telemetry math in `src/telemetry/cpu_math.h`. They do not call Win32, so they run without mocking `GetSystemTimes` or `GlobalMemoryStatusEx`.
+Tests cover the pure telemetry math, storage, anomaly detection, and v3 process grouping. One v3 smoke test checks that the Windows collector can sample its own process.
 
 Framework: **GoogleTest** (v1.15.2 via CMake FetchContent) plus **CTest**. The test binary is `sentinel_tests`.
 
@@ -12,8 +12,9 @@ Framework: **GoogleTest** (v1.15.2 via CMake FetchContent) plus **CTest**. The t
 | `ring_buffer_test.cpp` | `RingBuffer` push/snapshot order, capacity-one and overflow behavior, snapshot copies, concurrent snapshots, and multiple writers |
 | `anomaly_detector_test.cpp` | CPU/memory episode confirmation, threshold boundaries, simultaneous anomalies, and sampling-delay detection |
 | `event_store_test.cpp` | In-memory event ordering and empty-store behavior |
+| `process_telemetry_test.cpp` | Process CPU math, first-sample baselines, PID reuse, disappearance, Cursor/WSL grouping, top-group selection, bounded history, and summary formatting |
 
-`SystemCollector` stays out of unit tests in v0. Its transform logic is the functions above; the Win32 reads are thin wrappers.
+`SystemCollector` stays out of unit tests. Its CPU transform logic is tested separately; the Win32 reads are thin wrappers.
 
 ## Run
 
