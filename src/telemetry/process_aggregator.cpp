@@ -115,7 +115,7 @@ std::wstring formatProcessSummary(
         if (found->cpuUsagePercent) {
             output << *found->cpuUsagePercent << L"% CPU";
         } else {
-            output << L"CPU pending baseline";
+            output << L"CPU unavailable";
         }
         output << L" and "
                << static_cast<double>(found->workingSetBytes) / (1024.0 * 1024.0 * 1024.0)

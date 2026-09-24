@@ -59,12 +59,14 @@ ProcessSample process(
 
 }  // namespace
 
-TEST(ProcessCpuMath, UsesMachineWideTimeAndGuardsBadDeltas) {
-    EXPECT_DOUBLE_EQ(processCpuUsagePercent(10, 48, 100, 200), 38.0);
-    EXPECT_DOUBLE_EQ(processCpuUsagePercent(10, 60, 100, 200), 50.0);
-    EXPECT_DOUBLE_EQ(processCpuUsagePercent(10, 20, 100, 100), 0.0);
-    EXPECT_DOUBLE_EQ(processCpuUsagePercent(20, 10, 100, 200), 0.0);
-    EXPECT_DOUBLE_EQ(processCpuUsagePercent(10, 200, 100, 200), 100.0);
+TEST(ProcessCpuMath, DistinguishesZeroUsageFromInvalidDeltas) {
+    EXPECT_EQ(processCpuUsagePercent(10, 48, 100, 200), 38.0);
+    EXPECT_EQ(processCpuUsagePercent(10, 10, 100, 200), 0.0);
+    EXPECT_EQ(processCpuUsagePercent(10, 60, 100, 200), 50.0);
+    EXPECT_EQ(processCpuUsagePercent(10, 200, 100, 200), 100.0);
+    EXPECT_FALSE(processCpuUsagePercent(10, 20, 100, 100).has_value());
+    EXPECT_FALSE(processCpuUsagePercent(10, 20, 200, 100).has_value());
+    EXPECT_FALSE(processCpuUsagePercent(20, 10, 100, 200).has_value());
 }
 
 TEST(ProcessCollector, SamplesItsOwnProcessAcrossTwoTicks) {
@@ -116,6 +118,24 @@ TEST(ProcessTracker, DisappearedProcessLosesItsBaseline) {
     auto returned = tracker.update({}, 300, {raw(7, 1, 30)});
     ASSERT_EQ(returned.processes.size(), 1u);
     EXPECT_FALSE(returned.processes[0].cpuUsagePercent.has_value());
+}
+
+TEST(ProcessTracker, InvalidDeltasRemainUnavailableAndRecoverNextTick) {
+    ProcessTracker tracker;
+    static_cast<void>(tracker.update({}, 100, {raw(7, 1, 10)}));
+
+    const auto zeroSystemDelta = tracker.update({}, 100, {raw(7, 1, 20)});
+    ASSERT_EQ(zeroSystemDelta.processes.size(), 1u);
+    EXPECT_FALSE(zeroSystemDelta.processes[0].cpuUsagePercent.has_value());
+
+    const auto backwardsProcessTime = tracker.update({}, 200, {raw(7, 1, 5)});
+    ASSERT_EQ(backwardsProcessTime.processes.size(), 1u);
+    EXPECT_FALSE(backwardsProcessTime.processes[0].cpuUsagePercent.has_value());
+
+    const auto recovered = tracker.update({}, 300, {raw(7, 1, 5)});
+    ASSERT_EQ(recovered.processes.size(), 1u);
+    ASSERT_TRUE(recovered.processes[0].cpuUsagePercent.has_value());
+    EXPECT_DOUBLE_EQ(*recovered.processes[0].cpuUsagePercent, 0.0);
 }
 
 TEST(ProcessAggregator, GroupsCursorAndWslWithoutLosingOtherProcesses) {
@@ -185,7 +205,7 @@ TEST(ProcessHistory, DropsOldestSnapshotAtCapacity) {
     EXPECT_EQ(snapshots[1].time.utc, std::chrono::system_clock::time_point{std::chrono::seconds(3)});
 }
 
-TEST(ProcessSummary, FormatsRequestedGroupsAndMissingCpuBaseline) {
+TEST(ProcessSummary, FormatsRequestedGroupsAndUnavailableCpu) {
     constexpr std::uint64_t gib = 1024ull * 1024ull * 1024ull;
     ProcessGroupSnapshot snapshot;
     snapshot.groups = {
@@ -195,5 +215,5 @@ TEST(ProcessSummary, FormatsRequestedGroupsAndMissingCpuBaseline) {
     EXPECT_EQ(
         formatProcessSummary(snapshot, {L"Cursor", L"WSL"}),
         L"Cursor consumed 38.0% CPU and 2.0 GiB resident memory; "
-        L"WSL consumed CPU pending baseline and 6.0 GiB resident memory.");
+        L"WSL consumed CPU unavailable and 6.0 GiB resident memory.");
 }

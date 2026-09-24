@@ -55,7 +55,7 @@ The event stream makes additional metrics possible, including anomaly count, epi
 
 v3 adds `ProcessCollector`, a separate Windows process sampler. Each tick, it enumerates accessible processes and records their executable name, PID plus creation time, CPU usage, working-set bytes, and private committed bytes. PID plus creation time distinguishes a new process from a reused PID. The first sighting of each process establishes a CPU baseline; memory is available immediately.
 
-Process CPU percentage is the change in its kernel-plus-user time divided by the change in machine-wide CPU time. This keeps process percentages on the same 0–100% scale as system CPU. A group reports CPU as pending when any member still needs a baseline. Failed process reads are skipped without stopping collection.
+Process CPU percentage is the change in its kernel-plus-user time divided by the change in machine-wide CPU time. This keeps process percentages on the same 0–100% scale as system CPU. A zero or backward system-time delta, a backward process-time delta, or a missing baseline makes CPU unavailable rather than 0%. A group also reports CPU as unavailable when any member lacks a valid measurement. Failed process reads are skipped without stopping collection.
 
 The aggregator combines `Cursor.exe` processes into **Cursor** and `VmmemWSL.exe` or `vmmem.exe` into **WSL**. Other processes are grouped by executable name. It sums group CPU, working-set bytes, and private committed bytes. Working set is resident memory and may include shared pages, so summed group memory is an estimate rather than exclusive RAM ownership. WSL here refers to its Windows VM host process, not individual Linux processes.
 
