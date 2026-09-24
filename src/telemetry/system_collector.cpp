@@ -32,6 +32,9 @@ namespace {
 }  // namespace
 
 std::optional<SystemSample> SystemCollector::collect() {
+    // Keep the Win32 readings and baseline update in the same order across callers.
+    std::lock_guard lock(mutex_);
+
     RawCpuSample cpu{};
     if (!readCpuTimes(cpu)) {
         return std::nullopt;
@@ -44,8 +47,6 @@ std::optional<SystemSample> SystemCollector::collect() {
     }
 
     const auto timestamp = std::chrono::steady_clock::now();
-
-    std::lock_guard lock(mutex_);
 
     if (!previousCpu_.has_value()) {
         previousCpu_ = cpu;
