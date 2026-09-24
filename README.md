@@ -61,6 +61,8 @@ The aggregator combines `Cursor.exe` processes into **Cursor** and `VmmemWSL.exe
 
 The monitor retains 300 process-group snapshots, with Cursor and WSL plus the top 10 groups by CPU and top 10 by working set per snapshot. A summary formatter can produce text such as “Cursor consumed 38.0% CPU and 2.0 GiB resident memory; WSL consumed 4.0% CPU and 6.0 GiB resident memory.” The current CLI still runs silently; the formatter is ready for a later GUI or query command.
 
+When the system detector emits an event, an attribution step attaches the selected process groups from the same sampling pass before the event enters `EventStore`. The stored event keeps both the detector's episode timestamp and the system/process capture times. If process collection failed on that pass, the event has no process context. `AnomalyDetector` uses system telemetry only.
+
 System and process samples now include a UTC timestamp for future persistence while keeping monotonic timestamps for elapsed-time calculations. No process history is persisted yet.
 
 ## Build

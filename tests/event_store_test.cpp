@@ -8,6 +8,7 @@ using sentinel::detection::DetectionEvent;
 using sentinel::detection::EventState;
 using sentinel::detection::EventType;
 using sentinel::storage::EventStore;
+using sentinel::attribution::attachProcessContext;
 
 TEST(EventStore, AppendsEventsInOrder) {
     EventStore store;
@@ -24,17 +25,17 @@ TEST(EventStore, AppendsEventsInOrder) {
         .value = 2000.0,
     };
 
-    store.append(first);
-    store.append(second);
+    store.append(attachProcessContext(first, {}, nullptr));
+    store.append(attachProcessContext(second, {}, nullptr));
 
     const auto& events = store.events();
     ASSERT_EQ(events.size(), 2u);
-    EXPECT_EQ(events[0].type, EventType::HighCpu);
-    EXPECT_EQ(events[0].state, EventState::Started);
-    EXPECT_DOUBLE_EQ(events[0].value, 95.0);
-    EXPECT_EQ(events[1].type, EventType::SamplingDelay);
-    EXPECT_EQ(events[1].state, EventState::Occurred);
-    EXPECT_DOUBLE_EQ(events[1].value, 2000.0);
+    EXPECT_EQ(events[0].detection.type, EventType::HighCpu);
+    EXPECT_EQ(events[0].detection.state, EventState::Started);
+    EXPECT_DOUBLE_EQ(events[0].detection.value, 95.0);
+    EXPECT_EQ(events[1].detection.type, EventType::SamplingDelay);
+    EXPECT_EQ(events[1].detection.state, EventState::Occurred);
+    EXPECT_DOUBLE_EQ(events[1].detection.value, 2000.0);
 }
 
 TEST(EventStore, StartsEmpty) {

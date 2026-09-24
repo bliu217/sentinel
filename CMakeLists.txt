@@ -17,6 +17,7 @@ add_library(sentinel_telemetry STATIC
     src/storage/ring_buffer.cpp
     src/storage/process_history.cpp
     src/storage/event_store.cpp
+    src/attribution/anomaly_event.cpp
     src/detection/anomaly_detector.cpp
 )
 target_include_directories(sentinel_telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -55,6 +56,7 @@ if(SENTINEL_BUILD_TESTS)
         tests/ring_buffer_test.cpp
         tests/anomaly_detector_test.cpp
         tests/event_store_test.cpp
+        tests/event_attribution_test.cpp
     )
     target_link_libraries(sentinel_tests PRIVATE sentinel_telemetry GTest::gtest_main)
     include(GoogleTest)

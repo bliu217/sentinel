@@ -1,6 +1,6 @@
 #pragma once
 
-#include "detection/anomaly_detector.h"
+#include "attribution/anomaly_event.h"
 
 #include <vector>
 
@@ -8,12 +8,12 @@ namespace sentinel::storage {
 
 class EventStore {
 public:
-    void append(const detection::DetectionEvent& event);
+    void append(attribution::AnomalyEvent event);
 
-    [[nodiscard]] const std::vector<detection::DetectionEvent>& events() const noexcept;
+    [[nodiscard]] const std::vector<attribution::AnomalyEvent>& events() const noexcept;
 
 private:
-    std::vector<detection::DetectionEvent> events_;
+    std::vector<attribution::AnomalyEvent> events_;
 };
 
 }  // namespace sentinel::storage

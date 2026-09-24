@@ -1,3 +1,4 @@
+#include "attribution/anomaly_event.h"
 #include "detection/anomaly_detector.h"
 #include "storage/event_store.h"
 #include "storage/process_history.h"
@@ -9,8 +10,10 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <optional>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include <windows.h>
 
@@ -53,15 +56,27 @@ int main(int argc, char* argv[]) {
     auto nextTick = Clock::now();
 
     while (g_running.load(std::memory_order_relaxed)) {
-        if (const auto sample = collector.collect()) {
+        const auto sample = collector.collect();
+        const auto processSnapshot = processCollector.collect();
+
+        if (sample) {
             samples.push(*sample);
-            for (const auto& event : detector.analyze(*sample)) {
-                eventStore.append(event);
-            }
         }
-        if (auto processSnapshot = processCollector.collect()) {
-            processHistory.push(sentinel::telemetry::selectTopProcesses(
-                sentinel::telemetry::aggregateProcesses(*processSnapshot)));
+        std::optional<sentinel::telemetry::ProcessGroupSnapshot> selectedProcesses;
+        if (processSnapshot) {
+            selectedProcesses = sentinel::telemetry::selectTopProcesses(
+                sentinel::telemetry::aggregateProcesses(*processSnapshot));
+            processHistory.push(*selectedProcesses);
+        }
+
+        if (sample) {
+            const sentinel::telemetry::SampleTime observedAt{sample->timestamp, sample->utcTimestamp};
+            for (auto& detection : detector.analyze(*sample)) {
+                eventStore.append(sentinel::attribution::attachProcessContext(
+                    std::move(detection),
+                    observedAt,
+                    selectedProcesses ? &*selectedProcesses : nullptr));
+            }
         }
 
         nextTick += std::chrono::seconds(1);
