@@ -10,7 +10,7 @@
 namespace sentinel::telemetry {
 
 struct SystemSample {
-    std::chrono::system_clock::time_point timestamp{};
+    std::chrono::steady_clock::time_point timestamp{};
     double cpuUsagePercent{};
     std::uint64_t memoryUsedBytes{};
     std::uint64_t memoryAvailableBytes{};

@@ -1,10 +1,10 @@
+#include "detection/anomaly_detector.h"
+#include "storage/event_store.h"
+#include "storage/ring_buffer.h"
 #include "telemetry/system_collector.h"
 
 #include <atomic>
 #include <chrono>
-#include <cstdint>
-#include <ctime>
-#include <format>
 #include <iostream>
 #include <string_view>
 #include <thread>
@@ -27,31 +27,6 @@ void printUsage() {
     std::cerr << "Usage: sentinel start\n";
 }
 
-[[nodiscard]] constexpr double bytesToGib(std::uint64_t bytes) noexcept {
-    return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
-}
-
-void printSample(const sentinel::telemetry::SystemSample& sample) {
-    const std::time_t time = std::chrono::system_clock::to_time_t(sample.timestamp);
-    std::tm utc{};
-    if (gmtime_s(&utc, &time) != 0) {
-        return;
-    }
-
-    std::cout << std::format(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z cpu={:.1f}% mem_used={:.1f}GiB mem_avail={:.1f}GiB\n",
-        utc.tm_year + 1900,
-        utc.tm_mon + 1,
-        utc.tm_mday,
-        utc.tm_hour,
-        utc.tm_min,
-        utc.tm_sec,
-        sample.cpuUsagePercent,
-        bytesToGib(sample.memoryUsedBytes),
-        bytesToGib(sample.memoryAvailableBytes));
-    std::cout.flush();
-}
-
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -66,12 +41,18 @@ int main(int argc, char* argv[]) {
     }
 
     sentinel::telemetry::SystemCollector collector;
+    sentinel::storage::RingBuffer samples(300);
+    sentinel::detection::AnomalyDetector detector;
+    sentinel::storage::EventStore eventStore;
     using Clock = std::chrono::steady_clock;
     auto nextTick = Clock::now();
 
     while (g_running.load(std::memory_order_relaxed)) {
         if (const auto sample = collector.collect()) {
-            printSample(*sample);
+            samples.push(*sample);
+            for (const auto& event : detector.analyze(*sample)) {
+                eventStore.append(event);
+            }
         }
 
         nextTick += std::chrono::seconds(1);
