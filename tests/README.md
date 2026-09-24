@@ -9,6 +9,7 @@ Framework: **GoogleTest** (v1.15.2 via CMake FetchContent) plus **CTest**. The t
 | File | What it checks |
 | --- | --- |
 | `cpu_math_test.cpp` | `fileTimeToU64` dword packing; CPU % for idle-only, busy-only, mixed load, zero delta, backwards counters, idle exceeding total |
+| `ring_buffer_test.cpp` | `RingBuffer` push/snapshot order, overflow drops the oldest sample, snapshot is a copy, concurrent push and snapshot |
 
 `SystemCollector` stays out of unit tests in v0. Its transform logic is the functions above; the Win32 reads are thin wrappers.
 

@@ -11,6 +11,7 @@ endif()
 
 add_library(sentinel_telemetry STATIC
     src/telemetry/system_collector.cpp
+    src/storage/ring_buffer.cpp
 )
 target_include_directories(sentinel_telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
@@ -39,7 +40,10 @@ if(SENTINEL_BUILD_TESTS)
     FetchContent_MakeAvailable(googletest)
 
     enable_testing()
-    add_executable(sentinel_tests tests/cpu_math_test.cpp)
+    add_executable(sentinel_tests
+        tests/cpu_math_test.cpp
+        tests/ring_buffer_test.cpp
+    )
     target_link_libraries(sentinel_tests PRIVATE sentinel_telemetry GTest::gtest_main)
     include(GoogleTest)
     set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)

@@ -65,7 +65,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    
     sentinel::telemetry::SystemCollector collector;
     using Clock = std::chrono::steady_clock;
     auto nextTick = Clock::now();
