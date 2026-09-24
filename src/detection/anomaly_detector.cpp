@@ -30,6 +30,7 @@ std::vector<DetectionEvent> AnomalyDetector::analyze(const telemetry::SystemSamp
         sample.cpuUsagePercent >= kHighCpuPercent,
         sample.cpuUsagePercent,
         sample.timestamp,
+        sample.utcTimestamp,
         cpuEpisode_,
         events);
 
@@ -39,6 +40,7 @@ std::vector<DetectionEvent> AnomalyDetector::analyze(const telemetry::SystemSamp
         memoryPercent >= kHighMemoryPercent,
         memoryPercent,
         sample.timestamp,
+        sample.utcTimestamp,
         memoryEpisode_,
         events);
 
@@ -50,6 +52,7 @@ std::vector<DetectionEvent> AnomalyDetector::analyze(const telemetry::SystemSamp
                 .state = EventState::Occurred,
                 .timestamp = sample.timestamp,
                 .value = std::chrono::duration<double, std::milli>(gap).count(),
+                .occurredAtUtc = sample.utcTimestamp,
             });
         }
     }
@@ -63,6 +66,7 @@ void AnomalyDetector::updateEpisode(
     bool thresholdReached,
     double value,
     std::chrono::steady_clock::time_point timestamp,
+    std::chrono::system_clock::time_point utcTimestamp,
     EpisodeState& episode,
     std::vector<DetectionEvent>& events) {
     const bool confirmsCurrentState = episode.active ? !thresholdReached : thresholdReached;
@@ -73,6 +77,7 @@ void AnomalyDetector::updateEpisode(
 
     if (episode.consecutiveSamples == 0) {
         episode.candidateTimestamp = timestamp;
+        episode.candidateUtc = utcTimestamp;
         episode.candidateValue = value;
     }
 
@@ -88,6 +93,7 @@ void AnomalyDetector::updateEpisode(
         .state = episode.active ? EventState::Started : EventState::Stopped,
         .timestamp = episode.candidateTimestamp,
         .value = episode.candidateValue,
+        .occurredAtUtc = episode.candidateUtc,
     });
 }
 

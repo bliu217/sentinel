@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sentinel LANGUAGES CXX)
+project(sentinel LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,6 +9,21 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
+include(FetchContent)
+FetchContent_Declare(sqlite_amalgamation
+    URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+    URL_HASH SHA256=77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(sqlite_amalgamation)
+add_library(sentinel_sqlite STATIC "${sqlite_amalgamation_SOURCE_DIR}/sqlite3.c")
+target_include_directories(sentinel_sqlite PUBLIC "${sqlite_amalgamation_SOURCE_DIR}")
+
+FetchContent_Declare(nlohmann_json
+    URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip
+    URL_HASH SHA256=04022b05d806eb5ff73023c280b68697d12b93e1b7267a0b22a1a39ec7578069
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_library(sentinel_telemetry STATIC
     src/telemetry/system_collector.cpp
     src/telemetry/process_collector.cpp
@@ -17,10 +32,13 @@ add_library(sentinel_telemetry STATIC
     src/storage/ring_buffer.cpp
     src/storage/process_history.cpp
     src/storage/event_store.cpp
+    src/storage/sqlite_store.cpp
+    src/storage/archive_manager.cpp
     src/attribution/anomaly_event.cpp
     src/detection/anomaly_detector.cpp
 )
 target_include_directories(sentinel_telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(sentinel_telemetry PUBLIC sentinel_sqlite nlohmann_json::nlohmann_json)
 if(WIN32)
     target_link_libraries(sentinel_telemetry PUBLIC Psapi)
 endif()
@@ -57,6 +75,7 @@ if(SENTINEL_BUILD_TESTS)
         tests/anomaly_detector_test.cpp
         tests/event_store_test.cpp
         tests/event_attribution_test.cpp
+        tests/persistence_test.cpp
     )
     target_link_libraries(sentinel_tests PRIVATE sentinel_telemetry GTest::gtest_main)
     include(GoogleTest)

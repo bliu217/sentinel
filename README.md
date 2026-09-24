@@ -63,7 +63,11 @@ The monitor retains 300 process-group snapshots, with Cursor and WSL plus the to
 
 When the system detector emits an event, an attribution step attaches the selected process groups from the same sampling pass before the event enters `EventStore`. The stored event keeps both the detector's episode timestamp and the system/process capture times. If process collection failed on that pass, the event has no process context. `AnomalyDetector` uses system telemetry only.
 
-System and process samples now include a UTC timestamp for future persistence while keeping monotonic timestamps for elapsed-time calculations. No process history is persisted yet.
+System and process samples include a UTC timestamp for persistence while keeping monotonic timestamps for elapsed-time calculations.
+
+## Persistence
+
+The monitor writes each available system sample, every accessible process sample, and every anomaly event to SQLite in one transaction per tick. Events keep both the original episode timestamp and the later observation timestamp. The permanent project archive uses compact JSONL, with one anomaly or sample per line and a manifest describing the project.
 
 ## Build
 
@@ -76,14 +80,19 @@ cmake --build --preset windows-msvc-ninja
 
 Binary: `build/sentinel.exe`.
 
+The build fetches pinned SQLite 3.46.1 and nlohmann/json 3.11.3 sources. Network access is needed for the first configure unless CMake's dependency cache is populated.
+
 ## Use
 
 ```bat
 build\sentinel.exe start
+build\sentinel.exe start --max-db-size-mib 4096
+build\sentinel.exe archive create cursor-investigation --name "Cursor lag investigation"
+build\sentinel.exe archive add cursor-investigation --from 2026-09-24T18:00:00Z --to 2026-09-24T19:00:00Z --app cursor.exe --events cpu,memory,collection-lag --include-samples
 ```
 
-Anything other than `start` prints `Usage: sentinel start` and exits with status 1.
+Sentinel creates `data/` beside the executable. `sentinel.db` holds all available system and per-process samples and anomaly events. Startup removes records older than 30 days; a 2 GiB default database cap may remove older records sooner. The `--max-db-size-mib` option changes that cap for a monitoring run. If a tick cannot be saved, monitoring stops with an error.
 
-The monitor runs silently after startup because samples and events are held in memory for later analysis and persistence work.
+`archive create` makes a permanent project folder under `data/archive/`. `archive add` copies records from the half-open UTC range `[from, to)` into `anomalies.jsonl` and, when requested, `samples.jsonl`. Repeating the same selection does not duplicate records. Application names match case-insensitively. An application filter limits process rows to matching executables while retaining system samples in the chosen range. The manifest records project metadata, contents, and committed file lengths so an interrupted append can be repaired on the next add. Archives are not pruned with SQLite. Automatic archive rules and generated project READMEs are future work.
 
 See [tests/README.md](tests/README.md) for how tests are organized and how to run them.

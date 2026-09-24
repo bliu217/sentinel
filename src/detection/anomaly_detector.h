@@ -26,6 +26,7 @@ struct DetectionEvent {
     EventState state{};
     std::chrono::steady_clock::time_point timestamp{};
     double value{};
+    std::optional<std::chrono::system_clock::time_point> occurredAtUtc;
 };
 
 class AnomalyDetector {
@@ -37,6 +38,7 @@ private:
         bool active{};
         std::size_t consecutiveSamples{};
         std::chrono::steady_clock::time_point candidateTimestamp{};
+        std::chrono::system_clock::time_point candidateUtc{};
         double candidateValue{};
     };
 
@@ -45,6 +47,7 @@ private:
         bool thresholdReached,
         double value,
         std::chrono::steady_clock::time_point timestamp,
+        std::chrono::system_clock::time_point utcTimestamp,
         EpisodeState& episode,
         std::vector<DetectionEvent>& events);
 
