@@ -33,7 +33,7 @@ std::vector<telemetry::SystemSample> RingBuffer::snapshot() const {
     return samples;
 }
 
-std::size_t RingBuffer::size() const noexcept {
+std::size_t RingBuffer::size() const {
     std::lock_guard lock(mutex_);
     return size_;
 }
@@ -42,7 +42,7 @@ std::size_t RingBuffer::capacity() const noexcept {
     return capacity_;
 }
 
-bool RingBuffer::empty() const noexcept {
+bool RingBuffer::empty() const {
     std::lock_guard lock(mutex_);
     return size_ == 0;
 }

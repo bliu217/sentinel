@@ -14,9 +14,9 @@ public:
     void push(const telemetry::SystemSample& sample);
 
     [[nodiscard]] std::vector<telemetry::SystemSample> snapshot() const;
-    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::size_t capacity() const noexcept;
-    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] bool empty() const;
 
 private:
     mutable std::mutex mutex_;
