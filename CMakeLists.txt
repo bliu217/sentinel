@@ -25,6 +25,7 @@ FetchContent_Declare(nlohmann_json
 FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(sentinel_telemetry STATIC
+    src/paths.cpp
     src/telemetry/system_collector.cpp
     src/telemetry/process_collector.cpp
     src/telemetry/process_tracker.cpp
@@ -40,7 +41,7 @@ add_library(sentinel_telemetry STATIC
 target_include_directories(sentinel_telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(sentinel_telemetry PUBLIC sentinel_sqlite nlohmann_json::nlohmann_json)
 if(WIN32)
-    target_link_libraries(sentinel_telemetry PUBLIC Psapi)
+    target_link_libraries(sentinel_telemetry PUBLIC Psapi Shell32 Ole32)
 endif()
 
 if(MSVC)

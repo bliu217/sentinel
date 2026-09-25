@@ -1,6 +1,7 @@
 #include "attribution/anomaly_event.h"
 #include "detection/anomaly_detector.h"
 #include "monitoring_config.h"
+#include "paths.h"
 #include "storage/event_store.h"
 #include "storage/archive_manager.h"
 #include "storage/process_history.h"
@@ -41,14 +42,6 @@ void printUsage() {
               << "  sentinel archive create SLUG --name NAME\n"
               << "  sentinel archive add SLUG --from UTC --to UTC [--app EXE]... "
                  "[--events cpu,memory,collection-lag] [--include-samples]\n";
-}
-
-[[nodiscard]] std::filesystem::path dataDirectory() {
-    std::wstring path(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    if (length == 0 || length == path.size()) throw std::runtime_error("Cannot locate Sentinel executable");
-    path.resize(length);
-    return std::filesystem::path(path).parent_path() / "data";
 }
 
 [[nodiscard]] std::chrono::system_clock::time_point parseUtc(const std::string& text) {
@@ -111,17 +104,18 @@ void printUsage() {
     return result;
 }
 
-[[nodiscard]] int archiveCommand(int argc, char* argv[], const std::filesystem::path& data) {
+[[nodiscard]] int archiveCommand(int argc, char* argv[]) {
     if (argc < 5) { printUsage(); return 1; }
     const std::string_view action = argv[2];
     const std::string slug = argv[3];
-    const std::filesystem::path dbPath = data / "sentinel.db";
+    const std::filesystem::path dbPath = sentinel::paths::databasePath();
     if (action == "add" && !std::filesystem::exists(dbPath)) {
         throw std::runtime_error("No Sentinel database exists yet");
     }
-    std::filesystem::create_directories(data / "exports");
+    std::filesystem::create_directories(sentinel::paths::localDataDirectory());
+    std::filesystem::create_directories(sentinel::paths::archiveDirectory());
     sentinel::storage::SQLiteStore store(dbPath, 0);
-    sentinel::storage::ArchiveManager archives(store, data / "archive");
+    sentinel::storage::ArchiveManager archives(store, sentinel::paths::archiveDirectory());
     if (action == "create") {
         if (argc != 6 || std::string_view(argv[4]) != "--name") {
             printUsage(); return 1;
@@ -170,7 +164,7 @@ void printUsage() {
     return 0;
 }
 
-[[nodiscard]] int startCommand(int argc, char* argv[], const std::filesystem::path& data) {
+[[nodiscard]] int startCommand(int argc, char* argv[]) {
     sentinel::MonitoringConfig config;
     if (argc != 2) {
         if (argc != 4 || std::string_view(argv[2]) != "--max-db-size-mib") {
@@ -187,9 +181,10 @@ void printUsage() {
     if (SetConsoleCtrlHandler(onConsoleCtrl, TRUE) == 0) {
         throw std::runtime_error("Failed to register console control handler");
     }
-    std::filesystem::create_directories(data / "archive");
-    std::filesystem::create_directories(data / "exports");
-    sentinel::storage::SQLiteStore database(data / "sentinel.db", config.maxDatabaseSizeMiB * 1024 * 1024);
+    std::filesystem::create_directories(sentinel::paths::localDataDirectory());
+    std::filesystem::create_directories(sentinel::paths::exportsDirectory());
+    sentinel::storage::SQLiteStore database(sentinel::paths::databasePath(),
+        config.maxDatabaseSizeMiB * 1024 * 1024);
     sentinel::storage::RetentionManager retention(database, config.retentionPeriod);
     retention.pruneOnStartup(std::chrono::system_clock::now());
     sentinel::telemetry::SystemCollector collector;
@@ -232,10 +227,10 @@ void printUsage() {
 int main(int argc, char* argv[]) {
     try {
         if (argc >= 2 && std::string_view(argv[1]) == "start") {
-            return startCommand(argc, argv, dataDirectory());
+            return startCommand(argc, argv);
         }
         if (argc >= 2 && std::string_view(argv[1]) == "archive") {
-            return archiveCommand(argc, argv, dataDirectory());
+            return archiveCommand(argc, argv);
         }
         printUsage();
         return 1;
