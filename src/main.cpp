@@ -219,7 +219,7 @@ void printUsage() {
                     selectedProcesses ? &*selectedProcesses : nullptr));
             }
         }
-        if (sample || processSnapshot) eventStore.commitTick(tickUtc, sample, processSnapshot);
+        if (sample || selectedProcesses) eventStore.commitTick(tickUtc, sample, selectedProcesses);
         nextTick += std::chrono::seconds(1);
         std::this_thread::sleep_until(nextTick);
     }

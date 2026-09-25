@@ -23,11 +23,13 @@ struct ProcessGroupSnapshot {
     std::vector<ProcessGroup> groups;
 };
 
+inline constexpr std::size_t kDefaultTopProcessGroupsPerMetric = 10;
+
 [[nodiscard]] std::wstring processGroupName(const std::wstring& imageName);
 [[nodiscard]] ProcessGroupSnapshot aggregateProcesses(const ProcessSnapshot& snapshot);
 [[nodiscard]] ProcessGroupSnapshot selectTopProcesses(
     ProcessGroupSnapshot snapshot,
-    std::size_t topPerMetric = 10);
+    std::size_t topPerMetric = kDefaultTopProcessGroupsPerMetric);
 [[nodiscard]] std::wstring formatProcessSummary(
     const ProcessGroupSnapshot& snapshot,
     const std::vector<std::wstring>& names);

@@ -12,9 +12,9 @@ void EventStore::append(attribution::AnomalyEvent event) {
 void EventStore::commitTick(
     std::chrono::system_clock::time_point tickUtc,
     const std::optional<telemetry::SystemSample>& system,
-    const std::optional<telemetry::ProcessSnapshot>& processes) {
+    const std::optional<telemetry::ProcessGroupSnapshot>& processContext) {
     if (persistentStore_ == nullptr) return;
-    persistentStore_->writeTick(tickUtc, system, processes, events_);
+    persistentStore_->writeTick(tickUtc, system, processContext, events_);
     events_.clear();
 }
 

@@ -1,9 +1,11 @@
 #include "storage/archive_manager.h"
 #include "storage/event_store.h"
 #include "storage/sqlite_store.h"
+#include "telemetry/process_aggregator.h"
 
 #include <nlohmann/json.hpp>
 #include <gtest/gtest.h>
+#include <sqlite3.h>
 #include <windows.h>
 
 #include <atomic>
@@ -44,11 +46,16 @@ public:
     sentinel::telemetry::ProcessSnapshot snapshot;
     snapshot.time = {std::chrono::steady_clock::time_point{std::chrono::seconds(seconds)}, at(seconds)};
     snapshot.processes = {
-        {.identity = {4812, 100}, .imageName = L"cursor.exe", .cpuUsagePercent = 68.3,
+        {.identity = {4812, 100}, .imageName = L"Cursor.exe", .cpuUsagePercent = 68.3,
             .workingSetBytes = 1532 * 1024 * 1024ULL, .privateBytes = 500},
-        {.identity = {4812, 200}, .imageName = L"wsl.exe", .cpuUsagePercent = std::nullopt,
+        {.identity = {4812, 200}, .imageName = L"VmmemWSL.exe", .cpuUsagePercent = std::nullopt,
             .workingSetBytes = 1000, .privateBytes = 900}};
     return snapshot;
+}
+
+[[nodiscard]] sentinel::telemetry::ProcessGroupSnapshot selectedProcesses(int seconds) {
+    return sentinel::telemetry::selectTopProcesses(
+        sentinel::telemetry::aggregateProcesses(processes(seconds)));
 }
 
 [[nodiscard]] sentinel::attribution::AnomalyEvent event(int observedSecond, int occurredSecond) {
@@ -85,39 +92,104 @@ public:
 
 }  // namespace
 
-TEST(SQLiteStore, PersistsAllProcessSamplesAndEventTimingAcrossRestart) {
+TEST(SQLiteStore, PersistsSelectedProcessGroupsAndEventTimingAcrossRestart) {
     TemporaryDirectory directory;
     const auto database = directory.path / "sentinel.db";
     {
         sentinel::storage::SQLiteStore store(database);
         sentinel::storage::EventStore events(&store);
         events.append(event(12, 10));
-        events.commitTick(at(12), system(12), processes(12));
-        events.commitTick(at(13), std::nullopt, processes(13));
+        events.commitTick(at(12), system(12), selectedProcesses(12));
+        events.commitTick(at(13), std::nullopt, selectedProcesses(13));
     }
     sentinel::storage::SQLiteStore reopened(database);
     const auto ticks = reopened.readTicks(at(10), at(14));
     ASSERT_EQ(ticks.size(), 2u);
     ASSERT_TRUE(ticks[0].system);
-    ASSERT_TRUE(ticks[0].processes);
-    ASSERT_EQ(ticks[0].processes->processes.size(), 2u);
-    EXPECT_EQ(ticks[0].processes->processes[0].identity.processId, 4812u);
-    EXPECT_NE(ticks[0].processes->processes[0].identity.creationTime,
-              ticks[0].processes->processes[1].identity.creationTime);
-    EXPECT_FALSE(ticks[0].processes->processes[1].cpuUsagePercent);
+    ASSERT_TRUE(ticks[0].processContext);
+    ASSERT_EQ(ticks[0].processContext->groups.size(), 2u);
+    EXPECT_EQ(ticks[0].processContext->time.utc, at(12));
+    EXPECT_EQ(ticks[0].processContext->groups[0].name, L"Cursor");
+    EXPECT_EQ(ticks[0].processContext->groups[1].name, L"WSL");
+    EXPECT_FALSE(ticks[0].processContext->groups[1].cpuUsagePercent);
     ASSERT_EQ(ticks[0].anomalies.size(), 1u);
     EXPECT_EQ(ticks[0].anomalies[0].occurredUtcMilliseconds, 10000);
     EXPECT_EQ(ticks[0].anomalies[0].observedUtcMilliseconds, 12000);
     EXPECT_FALSE(ticks[1].system);
-    EXPECT_TRUE(ticks[1].processes);
+    EXPECT_TRUE(ticks[1].processContext);
 }
 
-TEST(SQLiteStore, PersistsAnomalyContextIndependentlyOfRawProcessSamples) {
+TEST(SQLiteStore, WritesDefaultTopTenPerMetricWithoutRawProcessRows) {
+    TemporaryDirectory directory;
+    const auto database = directory.path / "sentinel.db";
+    sentinel::telemetry::ProcessGroupSnapshot grouped;
+    grouped.time.utc = at(12);
+    grouped.groups.push_back({.name = L"Cursor", .cpuUsagePercent = 0.0,
+        .workingSetBytes = 0, .processCount = 2});
+    grouped.groups.push_back({.name = L"WSL", .cpuUsagePercent = 0.0,
+        .workingSetBytes = 0, .processCount = 1});
+    for (int index = 0; index < 24; ++index) {
+        grouped.groups.push_back({.name = L"group" + std::to_wstring(index),
+            .cpuUsagePercent = static_cast<double>(24 - index),
+            .workingSetBytes = static_cast<std::uint64_t>(index + 1), .processCount = 1});
+    }
+    const auto selected = sentinel::telemetry::selectTopProcesses(grouped);
+    ASSERT_EQ(selected.groups.size(), 22u);
+    {
+        sentinel::storage::SQLiteStore store(database);
+        store.writeTick(at(12), system(12), selected, {});
+    }
+    sentinel::storage::SQLiteStore reopened(database);
+    const auto ticks = reopened.readTicks(at(12), at(13));
+    ASSERT_EQ(ticks.size(), 1u);
+    ASSERT_TRUE(ticks[0].processContext);
+    ASSERT_EQ(ticks[0].processContext->groups.size(), 22u);
+    EXPECT_EQ(ticks[0].processContext->groups.front().name, L"Cursor");
+    EXPECT_EQ(ticks[0].processContext->groups.back().name, L"group23");
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open16(database.c_str(), &db), SQLITE_OK);
+    sqlite3_stmt* query = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db,
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='process_samples'",
+        -1, &query, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(query), SQLITE_ROW);
+    EXPECT_EQ(sqlite3_column_int(query, 0), 0);
+    sqlite3_finalize(query);
+    sqlite3_close(db);
+}
+
+TEST(SQLiteStore, ReadsLegacyPidRowsAsSelectedGroups) {
+    TemporaryDirectory directory;
+    const auto database = directory.path / "sentinel.db";
+    { sentinel::storage::SQLiteStore store(database); }
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open16(database.c_str(), &db), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+        "CREATE TABLE process_samples (tick_id INTEGER NOT NULL REFERENCES ticks(id) ON DELETE CASCADE,"
+        "pid INTEGER NOT NULL, creation_time INTEGER NOT NULL, image_name TEXT NOT NULL,"
+        "cpu_percent REAL, working_set_bytes INTEGER NOT NULL, private_bytes INTEGER NOT NULL);"
+        "INSERT INTO ticks(utc_ms,process_utc_ms) VALUES(12000,12000);"
+        "INSERT INTO process_samples VALUES(1,4812,100,'Cursor.exe',20,1000,500);"
+        "INSERT INTO process_samples VALUES(1,4813,200,'Cursor.exe',18,2000,700);",
+        nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(db);
+    sentinel::storage::SQLiteStore reopened(database);
+    const auto ticks = reopened.readTicks(at(12), at(13));
+    ASSERT_EQ(ticks.size(), 1u);
+    ASSERT_TRUE(ticks[0].processContext);
+    ASSERT_EQ(ticks[0].processContext->groups.size(), 1u);
+    EXPECT_EQ(ticks[0].processContext->groups[0].name, L"Cursor");
+    EXPECT_DOUBLE_EQ(*ticks[0].processContext->groups[0].cpuUsagePercent, 38.0);
+    EXPECT_EQ(ticks[0].processContext->groups[0].workingSetBytes, 3000u);
+    EXPECT_EQ(ticks[0].processContext->groups[0].processCount, 2u);
+}
+
+TEST(SQLiteStore, PersistsAnomalyContextIndependentlyOfTickProcessGroups) {
     TemporaryDirectory directory;
     const auto database = directory.path / "sentinel.db";
     {
         sentinel::storage::SQLiteStore store(database);
-        store.writeTick(at(12), system(12), processes(12),
+        store.writeTick(at(12), system(12), selectedProcesses(12),
             {attributedEvent(12, 10), event(12, 10)});
     }
     sentinel::storage::SQLiteStore reopened(database);
@@ -166,8 +238,8 @@ TEST(SQLiteStore, KeepsCandidateUtcWhenWallClockChangesBeforeConfirmation) {
 TEST(SQLiteStore, PrunesCompleteOldTicksAndRespectsHalfOpenQueries) {
     TemporaryDirectory directory;
     sentinel::storage::SQLiteStore store(directory.path / "sentinel.db");
-    store.writeTick(at(1), system(1), processes(1), {event(1, 1)});
-    store.writeTick(at(2), system(2), processes(2), {});
+    store.writeTick(at(1), system(1), selectedProcesses(1), {event(1, 1)});
+    store.writeTick(at(2), system(2), selectedProcesses(2), {});
     store.pruneBefore(at(2));
     EXPECT_EQ(store.countTicks(), 1);
     EXPECT_TRUE(store.readTicks(at(1), at(2)).empty());
@@ -191,14 +263,14 @@ TEST(SQLiteStore, SizeCapKeepsNewestAndRejectsOversizedTick) {
     TemporaryDirectory directory;
     sentinel::storage::SQLiteStore store(directory.path / "sentinel.db", 64 * 1024);
     for (int second = 1; second <= 150; ++second) {
-        store.writeTick(at(second), system(second), processes(second), {});
+        store.writeTick(at(second), system(second), selectedProcesses(second), {});
     }
     EXPECT_LE(std::filesystem::file_size(directory.path / "sentinel.db"), 64u * 1024u);
     EXPECT_LT(store.countTicks(), 150);
     const auto latest = store.readTicks(at(150), at(151));
     ASSERT_EQ(latest.size(), 1u);
-    auto huge = processes(151);
-    huge.processes[0].imageName = std::wstring(100000, L'x');
+    auto huge = selectedProcesses(151);
+    huge.groups[0].name = std::wstring(100000, L'x');
     EXPECT_THROW(store.writeTick(at(151), system(151), huge, {}), std::exception);
     EXPECT_TRUE(store.readTicks(at(150), at(151)).size() == 1u);
 }
@@ -206,7 +278,7 @@ TEST(SQLiteStore, SizeCapKeepsNewestAndRejectsOversizedTick) {
 TEST(ArchiveManager, WritesFilteredJsonlAndDeduplicatesRepeatedAdds) {
     TemporaryDirectory directory;
     sentinel::storage::SQLiteStore store(directory.path / "sentinel.db");
-    store.writeTick(at(12), system(12), processes(12), {attributedEvent(12, 10)});
+    store.writeTick(at(12), system(12), selectedProcesses(12), {attributedEvent(12, 10)});
     sentinel::storage::ArchiveManager archive(store, directory.path / "archive");
     archive.createProject("cursor-investigation", "Cursor lag investigation");
     sentinel::storage::ArchiveSelection selection{
@@ -228,17 +300,18 @@ TEST(ArchiveManager, WritesFilteredJsonlAndDeduplicatesRepeatedAdds) {
     EXPECT_EQ(anomalies[0]["processes"][0]["working_set_bytes"], 3000);
     EXPECT_EQ(anomalies[0]["processes"][0]["process_count"], 2);
     ASSERT_EQ(samples[0]["processes"].size(), 1u);
-    EXPECT_EQ(samples[0]["processes"][0]["name"], "cursor.exe");
+    EXPECT_EQ(samples[0]["processes"][0]["name"], "Cursor");
+    EXPECT_FALSE(samples[0]["processes"][0].contains("pid"));
     EXPECT_EQ(samples[0]["system"]["cpu_percent"], 97.2);
     const auto manifest = nlohmann::json::parse(std::ifstream(project / "manifest.json"));
     EXPECT_EQ(manifest["contains"], nlohmann::json::array({"cpu_anomaly"}));
     EXPECT_EQ(manifest["files"]["samples"], "samples.jsonl");
 }
 
-TEST(ArchiveManager, ExportsStoredAnomalyContextRatherThanTickProcesses) {
+TEST(ArchiveManager, ExportsStoredAnomalyContextRatherThanTickContext) {
     TemporaryDirectory directory;
     sentinel::storage::SQLiteStore store(directory.path / "sentinel.db");
-    store.writeTick(at(12), system(12), processes(12), {attributedEvent(12, 10)});
+    store.writeTick(at(12), system(12), selectedProcesses(12), {attributedEvent(12, 10)});
     sentinel::storage::ArchiveManager archive(store, directory.path / "archive");
     archive.createProject("incident", "Incident");
     archive.addToProject("incident", {.from = at(12), .to = at(13), .includeSamples = true});
@@ -253,13 +326,13 @@ TEST(ArchiveManager, ExportsStoredAnomalyContextRatherThanTickProcesses) {
     EXPECT_TRUE(anomalies[0]["processes"][1]["cpu_percent"].is_null());
     EXPECT_FALSE(anomalies[0]["processes"][0].contains("pid"));
     ASSERT_EQ(samples[0]["processes"].size(), 2u);
-    EXPECT_EQ(samples[0]["processes"][0]["name"], "cursor.exe");
+    EXPECT_EQ(samples[0]["processes"][0]["name"], "Cursor");
 }
 
 TEST(ArchiveManager, RepairsUncommittedTailBeforeAppend) {
     TemporaryDirectory directory;
     sentinel::storage::SQLiteStore store(directory.path / "sentinel.db");
-    store.writeTick(at(12), system(12), processes(12), {event(12, 10)});
+    store.writeTick(at(12), system(12), selectedProcesses(12), {event(12, 10)});
     sentinel::storage::ArchiveManager archive(store, directory.path / "archive");
     archive.createProject("incident", "Incident");
     const sentinel::storage::ArchiveSelection selection{.from = at(12), .to = at(13)};
@@ -276,18 +349,18 @@ TEST(ArchiveManager, RepairsUncommittedTailBeforeAppend) {
 TEST(ArchiveManager, DifferentApplicationSelectionsKeepTheirDistinctProcessViews) {
     TemporaryDirectory directory;
     sentinel::storage::SQLiteStore store(directory.path / "sentinel.db");
-    store.writeTick(at(12), system(12), processes(12), {event(12, 10)});
+    store.writeTick(at(12), system(12), selectedProcesses(12), {event(12, 10)});
     sentinel::storage::ArchiveManager archive(store, directory.path / "archive");
     archive.createProject("incident", "Incident");
     sentinel::storage::ArchiveSelection cursor{.from = at(12), .to = at(13),
         .applications = {L"cursor.exe"}, .includeSamples = true};
     sentinel::storage::ArchiveSelection wsl{.from = at(12), .to = at(13),
-        .applications = {L"wsl.exe"}, .includeSamples = true};
+        .applications = {L"vmmemwsl.exe"}, .includeSamples = true};
     archive.addToProject("incident", cursor);
     archive.addToProject("incident", wsl);
     const auto project = directory.path / "archive" / "incident";
     const auto samples = lines(project / "samples.jsonl");
     ASSERT_EQ(samples.size(), 2u);
-    EXPECT_EQ(samples[0]["processes"][0]["name"], "cursor.exe");
-    EXPECT_EQ(samples[1]["processes"][0]["name"], "wsl.exe");
+    EXPECT_EQ(samples[0]["processes"][0]["name"], "Cursor");
+    EXPECT_EQ(samples[1]["processes"][0]["name"], "WSL");
 }

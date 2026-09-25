@@ -12,7 +12,7 @@ Framework: **GoogleTest** (v1.15.2 via CMake FetchContent) plus **CTest**. The t
 | `ring_buffer_test.cpp` | `RingBuffer` push/snapshot order, capacity-one and overflow behavior, snapshot copies, concurrent snapshots, and multiple writers |
 | `anomaly_detector_test.cpp` | CPU/memory episode confirmation, threshold boundaries, simultaneous anomalies, and sampling-delay detection |
 | `event_store_test.cpp` | In-memory event ordering and empty-store behavior |
-| `persistence_test.cpp` | SQLite restart, retention, size cap, archive filtering, deduplication, and interrupted-append recovery |
+| `persistence_test.cpp` | SQLite restart, selected process-group persistence, legacy PID reads, retention, size cap, archive filtering, deduplication, and interrupted-append recovery |
 | `event_attribution_test.cpp` | CPU events with Cursor/WSL context, missing process snapshots, and selected-group retention |
 | `process_telemetry_test.cpp` | Process CPU math and invalid deltas, first-sample baselines, PID reuse, disappearance, Cursor/WSL grouping, top-group selection, bounded history, and summary formatting |
 

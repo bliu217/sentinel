@@ -144,11 +144,11 @@ SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxByt
             "cpu_percent REAL, memory_used_bytes INTEGER, memory_available_bytes INTEGER,"
             "process_utc_ms INTEGER);");
         execute(db_, "CREATE INDEX IF NOT EXISTS ticks_utc ON ticks(utc_ms,id);");
-        execute(db_, "CREATE TABLE IF NOT EXISTS process_samples ("
+        execute(db_, "CREATE TABLE IF NOT EXISTS tick_process_groups ("
             "tick_id INTEGER NOT NULL REFERENCES ticks(id) ON DELETE CASCADE,"
-            "pid INTEGER NOT NULL, creation_time INTEGER NOT NULL, image_name TEXT NOT NULL,"
-            "cpu_percent REAL, working_set_bytes INTEGER NOT NULL, private_bytes INTEGER NOT NULL);");
-        execute(db_, "CREATE INDEX IF NOT EXISTS processes_tick ON process_samples(tick_id);");
+            "group_order INTEGER NOT NULL, group_name TEXT NOT NULL, cpu_percent REAL,"
+            "working_set_bytes INTEGER NOT NULL, private_bytes INTEGER NOT NULL,"
+            "process_count INTEGER NOT NULL, PRIMARY KEY(tick_id,group_order));");
         execute(db_, "CREATE TABLE IF NOT EXISTS anomalies ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, tick_id INTEGER NOT NULL REFERENCES ticks(id) ON DELETE CASCADE,"
             "event_type INTEGER NOT NULL, state INTEGER NOT NULL, value REAL NOT NULL,"
@@ -194,12 +194,12 @@ SQLiteStore::~SQLiteStore() { sqlite3_close(db_); }
 void SQLiteStore::writeTick(
     Clock::time_point tickUtc,
     const std::optional<telemetry::SystemSample>& system,
-    const std::optional<telemetry::ProcessSnapshot>& processes,
+    const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
     const std::vector<attribution::AnomalyEvent>& anomalies) {
     std::uint64_t estimatedBytes = 512 + 128 * anomalies.size();
-    if (processes) {
-        for (const telemetry::ProcessSample& process : processes->processes) {
-            estimatedBytes += 128 + process.imageName.size() * 4;
+    if (processContext) {
+        for (const telemetry::ProcessGroup& group : processContext->groups) {
+            estimatedBytes += 128 + group.name.size() * 4;
         }
     }
     for (const attribution::AnomalyEvent& anomaly : anomalies) {
@@ -214,7 +214,7 @@ void SQLiteStore::writeTick(
     for (;;) {
         execute(db_, "BEGIN IMMEDIATE;");
         try {
-            writeTickOnce(tickUtc, system, processes, anomalies);
+            writeTickOnce(tickUtc, system, processContext, anomalies);
             execute(db_, "COMMIT;");
             break;
         } catch (const SqliteError& error) {
@@ -237,7 +237,7 @@ void SQLiteStore::writeTick(
 void SQLiteStore::writeTickOnce(
     Clock::time_point tickUtc,
     const std::optional<telemetry::SystemSample>& system,
-    const std::optional<telemetry::ProcessSnapshot>& processes,
+    const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
     const std::vector<attribution::AnomalyEvent>& anomalies) {
         Statement tick(db_, "INSERT INTO ticks(utc_ms,system_utc_ms,cpu_percent,memory_used_bytes,"
             "memory_available_bytes,process_utc_ms) VALUES(?1,?2,?3,?4,?5,?6)");
@@ -248,21 +248,22 @@ void SQLiteStore::writeTickOnce(
             tick.bind(4, static_cast<std::int64_t>(system->memoryUsedBytes));
             tick.bind(5, static_cast<std::int64_t>(system->memoryAvailableBytes));
         }
-        if (processes) tick.bind(6, millis(processes->time.utc));
+        if (processContext) tick.bind(6, millis(processContext->time.utc));
         tick.stepDone();
         const std::int64_t tickId = sqlite3_last_insert_rowid(db_);
-        Statement process(db_, "INSERT INTO process_samples VALUES(?1,?2,?3,?4,?5,?6,?7)");
-        if (processes) {
-            for (const telemetry::ProcessSample& item : processes->processes) {
-                process.bind(1, tickId);
-                process.bind(2, static_cast<std::int64_t>(item.identity.processId));
-                process.bind(3, static_cast<std::int64_t>(item.identity.creationTime));
-                process.bind(4, utf8(item.imageName));
-                if (item.cpuUsagePercent) process.bind(5, *item.cpuUsagePercent);
-                process.bind(6, static_cast<std::int64_t>(item.workingSetBytes));
-                process.bind(7, static_cast<std::int64_t>(item.privateBytes));
-                process.stepDone();
-                process.reset();
+        Statement processGroup(db_, "INSERT INTO tick_process_groups VALUES(?1,?2,?3,?4,?5,?6,?7)");
+        if (processContext) {
+            for (std::size_t index = 0; index < processContext->groups.size(); ++index) {
+                const telemetry::ProcessGroup& item = processContext->groups[index];
+                processGroup.bind(1, tickId);
+                processGroup.bind(2, static_cast<std::int64_t>(index));
+                processGroup.bind(3, utf8(item.name));
+                if (item.cpuUsagePercent) processGroup.bind(4, *item.cpuUsagePercent);
+                processGroup.bind(5, static_cast<std::int64_t>(item.workingSetBytes));
+                processGroup.bind(6, static_cast<std::int64_t>(item.privateBytes));
+                processGroup.bind(7, static_cast<std::int64_t>(item.processCount));
+                processGroup.stepDone();
+                processGroup.reset();
             }
         }
         Statement event(db_, "INSERT INTO anomalies(tick_id,event_type,state,value,occurred_utc_ms,"
@@ -354,8 +355,14 @@ std::vector<StoredTick> SQLiteStore::readTicks(
     ticks.bind(3, afterUtcMilliseconds);
     ticks.bind(4, afterId);
     ticks.bind(5, limit);
-    Statement processes(db_, "SELECT pid,creation_time,image_name,cpu_percent,working_set_bytes,private_bytes "
-        "FROM process_samples WHERE tick_id=?1 ORDER BY pid,creation_time");
+    Statement tickGroups(db_, "SELECT group_name,cpu_percent,working_set_bytes,private_bytes,process_count "
+        "FROM tick_process_groups WHERE tick_id=?1 ORDER BY group_order");
+    std::unique_ptr<Statement> legacyProcesses;
+    if (scalar(db_, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='process_samples'") != 0) {
+        legacyProcesses = std::make_unique<Statement>(db_,
+            "SELECT pid,creation_time,image_name,cpu_percent,working_set_bytes,private_bytes "
+            "FROM process_samples WHERE tick_id=?1 ORDER BY pid,creation_time");
+    }
     Statement anomalies(db_, "SELECT id,event_type,state,value,occurred_utc_ms,observed_utc_ms "
         "FROM anomalies WHERE tick_id=?1 ORDER BY id");
     Statement context(db_, "SELECT sampled_utc_ms FROM anomaly_process_context WHERE anomaly_id=?1");
@@ -373,23 +380,44 @@ std::vector<StoredTick> SQLiteStore::readTicks(
                 .utcTimestamp = fromMillis(sqlite3_column_int64(ticks.get(), 2))};
         }
         if (sqlite3_column_type(ticks.get(), 6) != SQLITE_NULL) {
-            tick.processes = telemetry::ProcessSnapshot{};
-            tick.processes->time.utc = fromMillis(sqlite3_column_int64(ticks.get(), 6));
-            processes.bind(1, tick.id);
-            while (processes.stepRow()) {
-                const char* name = reinterpret_cast<const char*>(sqlite3_column_text(processes.get(), 2));
-                telemetry::ProcessSample item;
-                item.identity.processId = static_cast<std::uint32_t>(sqlite3_column_int64(processes.get(), 0));
-                item.identity.creationTime = static_cast<std::uint64_t>(sqlite3_column_int64(processes.get(), 1));
-                item.imageName = wide(name != nullptr ? name : "");
-                if (sqlite3_column_type(processes.get(), 3) != SQLITE_NULL) {
-                    item.cpuUsagePercent = sqlite3_column_double(processes.get(), 3);
+            tick.processContext.emplace();
+            tick.processContext->time.utc = fromMillis(sqlite3_column_int64(ticks.get(), 6));
+            tickGroups.bind(1, tick.id);
+            while (tickGroups.stepRow()) {
+                const char* name = reinterpret_cast<const char*>(sqlite3_column_text(tickGroups.get(), 0));
+                telemetry::ProcessGroup item;
+                item.name = wide(name != nullptr ? name : "");
+                if (sqlite3_column_type(tickGroups.get(), 1) != SQLITE_NULL) {
+                    item.cpuUsagePercent = sqlite3_column_double(tickGroups.get(), 1);
                 }
-                item.workingSetBytes = static_cast<std::uint64_t>(sqlite3_column_int64(processes.get(), 4));
-                item.privateBytes = static_cast<std::uint64_t>(sqlite3_column_int64(processes.get(), 5));
-                tick.processes->processes.push_back(std::move(item));
+                item.workingSetBytes = static_cast<std::uint64_t>(sqlite3_column_int64(tickGroups.get(), 2));
+                item.privateBytes = static_cast<std::uint64_t>(sqlite3_column_int64(tickGroups.get(), 3));
+                item.processCount = static_cast<std::size_t>(sqlite3_column_int64(tickGroups.get(), 4));
+                tick.processContext->groups.push_back(std::move(item));
             }
-            processes.reset();
+            tickGroups.reset();
+            if (tick.processContext->groups.empty() && legacyProcesses) {
+                telemetry::ProcessSnapshot legacy;
+                legacy.time = tick.processContext->time;
+                legacyProcesses->bind(1, tick.id);
+                while (legacyProcesses->stepRow()) {
+                    const char* name = reinterpret_cast<const char*>(sqlite3_column_text(legacyProcesses->get(), 2));
+                    telemetry::ProcessSample item;
+                    item.identity.processId = static_cast<std::uint32_t>(sqlite3_column_int64(legacyProcesses->get(), 0));
+                    item.identity.creationTime = static_cast<std::uint64_t>(sqlite3_column_int64(legacyProcesses->get(), 1));
+                    item.imageName = wide(name != nullptr ? name : "");
+                    if (sqlite3_column_type(legacyProcesses->get(), 3) != SQLITE_NULL) {
+                        item.cpuUsagePercent = sqlite3_column_double(legacyProcesses->get(), 3);
+                    }
+                    item.workingSetBytes = static_cast<std::uint64_t>(sqlite3_column_int64(legacyProcesses->get(), 4));
+                    item.privateBytes = static_cast<std::uint64_t>(sqlite3_column_int64(legacyProcesses->get(), 5));
+                    legacy.processes.push_back(std::move(item));
+                }
+                legacyProcesses->reset();
+                if (!legacy.processes.empty()) {
+                    *tick.processContext = telemetry::selectTopProcesses(telemetry::aggregateProcesses(legacy));
+                }
+            }
         }
         anomalies.bind(1, tick.id);
         while (anomalies.stepRow()) {

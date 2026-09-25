@@ -98,29 +98,6 @@ private:
         {"memory_available_bytes", sample->memoryAvailableBytes}};
 }
 
-[[nodiscard]] bool matchesApp(const telemetry::ProcessSample& process, const ArchiveSelection& selection) {
-    if (selection.applications.empty()) return true;
-    const std::wstring name = lower(process.imageName);
-    return std::any_of(selection.applications.begin(), selection.applications.end(), [&](const auto& app) {
-        return name == lower(app);
-    });
-}
-
-[[nodiscard]] Json processJson(const StoredTick& tick, const ArchiveSelection& selection) {
-    Json processes = Json::array();
-    if (!tick.processes) return processes;
-    for (const telemetry::ProcessSample& process : tick.processes->processes) {
-        if (!matchesApp(process, selection)) continue;
-        processes.push_back(Json{{"pid", process.identity.processId},
-            {"creation_time", process.identity.creationTime},
-            {"name", utf8(process.imageName)},
-            {"cpu_percent", process.cpuUsagePercent ? Json(*process.cpuUsagePercent) : Json(nullptr)},
-            {"working_set_bytes", process.workingSetBytes},
-            {"private_bytes", process.privateBytes}});
-    }
-    return processes;
-}
-
 [[nodiscard]] bool matchesApp(const telemetry::ProcessGroup& group, const ArchiveSelection& selection) {
     if (selection.applications.empty()) return true;
     const std::wstring name = lower(group.name);
@@ -129,10 +106,10 @@ private:
     });
 }
 
-[[nodiscard]] Json anomalyProcessesJson(const StoredAnomaly& event, const ArchiveSelection& selection) {
+[[nodiscard]] Json processGroupsJson(
+    const std::vector<telemetry::ProcessGroup>& processGroups, const ArchiveSelection& selection) {
     Json groups = Json::array();
-    if (!event.processContext) return groups;
-    for (const telemetry::ProcessGroup& group : event.processContext->groups) {
+    for (const telemetry::ProcessGroup& group : processGroups) {
         if (!matchesApp(group, selection)) continue;
         groups.push_back(Json{{"name", utf8(group.name)},
             {"cpu_percent", group.cpuUsagePercent ? Json(*group.cpuUsagePercent) : Json(nullptr)},
@@ -177,7 +154,8 @@ private:
         {"system", systemJson(tick.system)},
         {"process_sampled_at", event.processContext ?
             Json(isoTime(millis(event.processContext->sampledAt.utc))) : Json(nullptr)},
-        {"processes", anomalyProcessesJson(event, selection)}};
+        {"processes", event.processContext ?
+            processGroupsJson(event.processContext->groups, selection) : Json::array()}};
 }
 
 [[nodiscard]] Json sampleJson(const StoredTick& tick, const ArchiveSelection& selection,
@@ -186,8 +164,10 @@ private:
             applicationKey(selection)},
         {"timestamp", isoTime(tick.utcMilliseconds)},
         {"system", systemJson(tick.system)},
-        {"process_sampled_at", tick.processes ? Json(isoTime(millis(tick.processes->time.utc))) : Json(nullptr)},
-        {"processes", processJson(tick, selection)}};
+        {"process_sampled_at", tick.processContext ?
+            Json(isoTime(millis(tick.processContext->time.utc))) : Json(nullptr)},
+        {"processes", tick.processContext ?
+            processGroupsJson(tick.processContext->groups, selection) : Json::array()}};
 }
 
 void flushDurable(const std::filesystem::path& path) {

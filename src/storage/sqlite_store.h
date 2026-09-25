@@ -29,7 +29,7 @@ struct StoredTick {
     std::int64_t id{};
     std::int64_t utcMilliseconds{};
     std::optional<telemetry::SystemSample> system;
-    std::optional<telemetry::ProcessSnapshot> processes;
+    std::optional<telemetry::ProcessGroupSnapshot> processContext;
     std::vector<StoredAnomaly> anomalies;
 };
 
@@ -43,7 +43,7 @@ public:
     void writeTick(
         std::chrono::system_clock::time_point tickUtc,
         const std::optional<telemetry::SystemSample>& system,
-        const std::optional<telemetry::ProcessSnapshot>& processes,
+        const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
         const std::vector<attribution::AnomalyEvent>& anomalies);
     void pruneBefore(std::chrono::system_clock::time_point cutoff);
     void enforceCap();
@@ -62,7 +62,7 @@ private:
     void writeTickOnce(
         std::chrono::system_clock::time_point tickUtc,
         const std::optional<telemetry::SystemSample>& system,
-        const std::optional<telemetry::ProcessSnapshot>& processes,
+        const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
         const std::vector<attribution::AnomalyEvent>& anomalies);
 
     sqlite3* db_{};

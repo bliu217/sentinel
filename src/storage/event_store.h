@@ -15,7 +15,7 @@ public:
     void commitTick(
         std::chrono::system_clock::time_point tickUtc,
         const std::optional<telemetry::SystemSample>& system,
-        const std::optional<telemetry::ProcessSnapshot>& processes);
+        const std::optional<telemetry::ProcessGroupSnapshot>& processContext);
 
     [[nodiscard]] const std::vector<attribution::AnomalyEvent>& events() const noexcept;
 
