@@ -18,7 +18,9 @@ namespace {
     return text;
 }
 
-[[nodiscard]] std::wstring groupName(const std::wstring& imageName) {
+}  // namespace
+
+std::wstring processGroupName(const std::wstring& imageName) {
     const std::wstring normalized = lower(imageName);
     if (normalized == L"cursor.exe") {
         return L"Cursor";
@@ -29,14 +31,12 @@ namespace {
     return normalized;
 }
 
-}  // namespace
-
 ProcessGroupSnapshot aggregateProcesses(const ProcessSnapshot& snapshot) {
     ProcessGroupSnapshot result{.time = snapshot.time};
     std::unordered_map<std::wstring, std::size_t> indexes;
     std::unordered_set<std::wstring> incompleteCpu;
     for (const ProcessSample& process : snapshot.processes) {
-        const std::wstring name = groupName(process.imageName);
+        const std::wstring name = processGroupName(process.imageName);
         const auto [position, inserted] = indexes.try_emplace(name, result.groups.size());
         if (inserted) {
             result.groups.push_back(ProcessGroup{.name = name});

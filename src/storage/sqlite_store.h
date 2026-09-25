@@ -22,6 +22,7 @@ struct StoredAnomaly {
     double value{};
     std::int64_t occurredUtcMilliseconds{};
     std::int64_t observedUtcMilliseconds{};
+    std::optional<attribution::ProcessContext> processContext;
 };
 
 struct StoredTick {

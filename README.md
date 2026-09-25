@@ -67,7 +67,7 @@ System and process samples include a UTC timestamp for persistence while keeping
 
 ## Persistence
 
-The monitor writes each available system sample, every accessible process sample, and every anomaly event to SQLite in one transaction per tick. Events keep both the original episode timestamp and the later observation timestamp. The permanent project archive uses compact JSONL, with one anomaly or sample per line and a manifest describing the project.
+The monitor writes each available system sample, every accessible process sample, and every anomaly event with its captured process-group context to SQLite in one transaction per tick. Events keep both the original episode timestamp and the later observation timestamp. The permanent project archive uses compact JSONL, with one anomaly or sample per line and a manifest describing the project.
 
 ## Build
 
@@ -93,6 +93,6 @@ build\sentinel.exe archive add cursor-investigation --from 2026-09-24T18:00:00Z 
 
 Sentinel creates `data/` beside the executable. `sentinel.db` holds all available system and per-process samples and anomaly events. Startup removes records older than 30 days; a 2 GiB default database cap may remove older records sooner. The `--max-db-size-mib` option changes that cap for a monitoring run. If a tick cannot be saved, monitoring stops with an error.
 
-`archive create` makes a permanent project folder under `data/archive/`. `archive add` copies records from the half-open UTC range `[from, to)` into `anomalies.jsonl` and, when requested, `samples.jsonl`. Repeating the same selection does not duplicate records. Application names match case-insensitively. An application filter limits process rows to matching executables while retaining system samples in the chosen range. The manifest records project metadata, contents, and committed file lengths so an interrupted append can be repaired on the next add. Archives are not pruned with SQLite. Automatic archive rules and generated project READMEs are future work.
+`archive create` makes a permanent project folder under `data/archive/`. `archive add` copies records from the half-open UTC range `[from, to)` into `anomalies.jsonl` and, when requested, `samples.jsonl`. Repeating the same selection does not duplicate records. Application names match case-insensitively. An anomaly record contains its captured process groups, while a sample record contains raw executable and PID rows. An application filter selects matching groups for anomalies and matching executables for samples; known executable names such as `cursor.exe` also match their group names. System samples remain in the chosen range. The manifest records project metadata, contents, and committed file lengths so an interrupted append can be repaired on the next add. Archives are not pruned with SQLite. Automatic archive rules and generated project READMEs are future work.
 
 See [tests/README.md](tests/README.md) for how tests are organized and how to run them.

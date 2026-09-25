@@ -121,6 +121,28 @@ private:
     return processes;
 }
 
+[[nodiscard]] bool matchesApp(const telemetry::ProcessGroup& group, const ArchiveSelection& selection) {
+    if (selection.applications.empty()) return true;
+    const std::wstring name = lower(group.name);
+    return std::any_of(selection.applications.begin(), selection.applications.end(), [&](const auto& app) {
+        return name == lower(telemetry::processGroupName(app));
+    });
+}
+
+[[nodiscard]] Json anomalyProcessesJson(const StoredAnomaly& event, const ArchiveSelection& selection) {
+    Json groups = Json::array();
+    if (!event.processContext) return groups;
+    for (const telemetry::ProcessGroup& group : event.processContext->groups) {
+        if (!matchesApp(group, selection)) continue;
+        groups.push_back(Json{{"name", utf8(group.name)},
+            {"cpu_percent", group.cpuUsagePercent ? Json(*group.cpuUsagePercent) : Json(nullptr)},
+            {"working_set_bytes", group.workingSetBytes},
+            {"private_bytes", group.privateBytes},
+            {"process_count", group.processCount}});
+    }
+    return groups;
+}
+
 [[nodiscard]] std::string applicationKey(const ArchiveSelection& selection) {
     std::vector<std::string> names;
     for (const std::wstring& app : selection.applications) names.push_back(utf8(lower(app)));
@@ -131,16 +153,15 @@ private:
     return result;
 }
 
-[[nodiscard]] bool eventMatches(const StoredTick& tick, const StoredAnomaly& event,
-    const ArchiveSelection& selection) {
+[[nodiscard]] bool eventMatches(const StoredAnomaly& event, const ArchiveSelection& selection) {
     if (!selection.eventTypes.empty() &&
         std::find(selection.eventTypes.begin(), selection.eventTypes.end(), event.type) == selection.eventTypes.end()) {
         return false;
     }
     if (selection.applications.empty()) return true;
-    if (!tick.processes) return false;
-    return std::any_of(tick.processes->processes.begin(), tick.processes->processes.end(),
-        [&](const auto& process) { return matchesApp(process, selection); });
+    if (!event.processContext) return false;
+    return std::any_of(event.processContext->groups.begin(), event.processContext->groups.end(),
+        [&](const auto& group) { return matchesApp(group, selection); });
 }
 
 [[nodiscard]] Json anomalyJson(const StoredTick& tick, const StoredAnomaly& event,
@@ -154,8 +175,9 @@ private:
         {"severity", event.state == detection::EventState::Stopped ? "info" : "warning"},
         {"value", event.value},
         {"system", systemJson(tick.system)},
-        {"process_sampled_at", tick.processes ? Json(isoTime(millis(tick.processes->time.utc))) : Json(nullptr)},
-        {"processes", processJson(tick, selection)}};
+        {"process_sampled_at", event.processContext ?
+            Json(isoTime(millis(event.processContext->sampledAt.utc))) : Json(nullptr)},
+        {"processes", anomalyProcessesJson(event, selection)}};
 }
 
 [[nodiscard]] Json sampleJson(const StoredTick& tick, const ArchiveSelection& selection,
@@ -295,7 +317,7 @@ void ArchiveManager::addToProject(const std::string& slug, const ArchiveSelectio
                 appendLine(sampleOutput, sampleJson(tick, selection, store_.storeId()), sampleIds);
             }
             for (const StoredAnomaly& event : tick.anomalies) {
-                if (!eventMatches(tick, event, selection)) continue;
+                if (!eventMatches(event, selection)) continue;
                 appendLine(anomalyOutput, anomalyJson(tick, event, selection, store_.storeId()), anomalyIds);
                 const std::string type = eventName(event.type);
                 if (std::find(manifest["contains"].begin(), manifest["contains"].end(), type) ==

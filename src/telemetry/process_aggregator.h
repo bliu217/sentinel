@@ -23,6 +23,7 @@ struct ProcessGroupSnapshot {
     std::vector<ProcessGroup> groups;
 };
 
+[[nodiscard]] std::wstring processGroupName(const std::wstring& imageName);
 [[nodiscard]] ProcessGroupSnapshot aggregateProcesses(const ProcessSnapshot& snapshot);
 [[nodiscard]] ProcessGroupSnapshot selectTopProcesses(
     ProcessGroupSnapshot snapshot,

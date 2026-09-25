@@ -154,6 +154,14 @@ SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxByt
             "event_type INTEGER NOT NULL, state INTEGER NOT NULL, value REAL NOT NULL,"
             "occurred_utc_ms INTEGER NOT NULL, observed_utc_ms INTEGER NOT NULL);");
         execute(db_, "CREATE INDEX IF NOT EXISTS anomalies_tick ON anomalies(tick_id);");
+        execute(db_, "CREATE TABLE IF NOT EXISTS anomaly_process_context ("
+            "anomaly_id INTEGER PRIMARY KEY REFERENCES anomalies(id) ON DELETE CASCADE,"
+            "sampled_utc_ms INTEGER NOT NULL);");
+        execute(db_, "CREATE TABLE IF NOT EXISTS anomaly_process_groups ("
+            "anomaly_id INTEGER NOT NULL REFERENCES anomalies(id) ON DELETE CASCADE,"
+            "group_order INTEGER NOT NULL, group_name TEXT NOT NULL, cpu_percent REAL,"
+            "working_set_bytes INTEGER NOT NULL, private_bytes INTEGER NOT NULL,"
+            "process_count INTEGER NOT NULL, PRIMARY KEY(anomaly_id,group_order));");
         execute(db_, "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);");
         {
             Statement readId(db_, "SELECT value FROM metadata WHERE key='store_id'");
@@ -192,6 +200,12 @@ void SQLiteStore::writeTick(
     if (processes) {
         for (const telemetry::ProcessSample& process : processes->processes) {
             estimatedBytes += 128 + process.imageName.size() * 4;
+        }
+    }
+    for (const attribution::AnomalyEvent& anomaly : anomalies) {
+        if (!anomaly.processContext) continue;
+        for (const telemetry::ProcessGroup& group : anomaly.processContext->groups) {
+            estimatedBytes += 128 + group.name.size() * 4;
         }
     }
     if (maxBytes_ != 0 && estimatedBytes > maxBytes_ / 2) {
@@ -253,6 +267,8 @@ void SQLiteStore::writeTickOnce(
         }
         Statement event(db_, "INSERT INTO anomalies(tick_id,event_type,state,value,occurred_utc_ms,"
             "observed_utc_ms) VALUES(?1,?2,?3,?4,?5,?6)");
+        Statement context(db_, "INSERT INTO anomaly_process_context VALUES(?1,?2)");
+        Statement group(db_, "INSERT INTO anomaly_process_groups VALUES(?1,?2,?3,?4,?5,?6,?7)");
         for (const attribution::AnomalyEvent& item : anomalies) {
             const auto elapsed = item.observedAt.steady - item.detection.timestamp;
             const auto occurred = item.detection.occurredAtUtc.value_or(
@@ -264,6 +280,25 @@ void SQLiteStore::writeTickOnce(
             event.bind(5, millis(occurred));
             event.bind(6, millis(item.observedAt.utc));
             event.stepDone();
+            if (item.processContext) {
+                const std::int64_t anomalyId = sqlite3_last_insert_rowid(db_);
+                context.bind(1, anomalyId);
+                context.bind(2, millis(item.processContext->sampledAt.utc));
+                context.stepDone();
+                context.reset();
+                for (std::size_t index = 0; index < item.processContext->groups.size(); ++index) {
+                    const telemetry::ProcessGroup& itemGroup = item.processContext->groups[index];
+                    group.bind(1, anomalyId);
+                    group.bind(2, static_cast<std::int64_t>(index));
+                    group.bind(3, utf8(itemGroup.name));
+                    if (itemGroup.cpuUsagePercent) group.bind(4, *itemGroup.cpuUsagePercent);
+                    group.bind(5, static_cast<std::int64_t>(itemGroup.workingSetBytes));
+                    group.bind(6, static_cast<std::int64_t>(itemGroup.privateBytes));
+                    group.bind(7, static_cast<std::int64_t>(itemGroup.processCount));
+                    group.stepDone();
+                    group.reset();
+                }
+            }
             event.reset();
         }
 }
@@ -323,6 +358,9 @@ std::vector<StoredTick> SQLiteStore::readTicks(
         "FROM process_samples WHERE tick_id=?1 ORDER BY pid,creation_time");
     Statement anomalies(db_, "SELECT id,event_type,state,value,occurred_utc_ms,observed_utc_ms "
         "FROM anomalies WHERE tick_id=?1 ORDER BY id");
+    Statement context(db_, "SELECT sampled_utc_ms FROM anomaly_process_context WHERE anomaly_id=?1");
+    Statement groups(db_, "SELECT group_name,cpu_percent,working_set_bytes,private_bytes,process_count "
+        "FROM anomaly_process_groups WHERE anomaly_id=?1 ORDER BY group_order");
     while (ticks.stepRow()) {
         StoredTick tick;
         tick.id = sqlite3_column_int64(ticks.get(), 0);
@@ -362,6 +400,27 @@ std::vector<StoredTick> SQLiteStore::readTicks(
                 .value = sqlite3_column_double(anomalies.get(), 3),
                 .occurredUtcMilliseconds = sqlite3_column_int64(anomalies.get(), 4),
                 .observedUtcMilliseconds = sqlite3_column_int64(anomalies.get(), 5)});
+            StoredAnomaly& stored = tick.anomalies.back();
+            context.bind(1, stored.id);
+            if (context.stepRow()) {
+                stored.processContext.emplace();
+                stored.processContext->sampledAt.utc = fromMillis(sqlite3_column_int64(context.get(), 0));
+                groups.bind(1, stored.id);
+                while (groups.stepRow()) {
+                    const char* name = reinterpret_cast<const char*>(sqlite3_column_text(groups.get(), 0));
+                    telemetry::ProcessGroup item;
+                    item.name = wide(name != nullptr ? name : "");
+                    if (sqlite3_column_type(groups.get(), 1) != SQLITE_NULL) {
+                        item.cpuUsagePercent = sqlite3_column_double(groups.get(), 1);
+                    }
+                    item.workingSetBytes = static_cast<std::uint64_t>(sqlite3_column_int64(groups.get(), 2));
+                    item.privateBytes = static_cast<std::uint64_t>(sqlite3_column_int64(groups.get(), 3));
+                    item.processCount = static_cast<std::size_t>(sqlite3_column_int64(groups.get(), 4));
+                    stored.processContext->groups.push_back(std::move(item));
+                }
+                groups.reset();
+            }
+            context.reset();
         }
         anomalies.reset();
         output.push_back(std::move(tick));
