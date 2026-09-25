@@ -19,7 +19,7 @@ using sentinel::telemetry::ProcessSample;
 using sentinel::telemetry::ProcessSnapshot;
 using sentinel::telemetry::SystemSample;
 using sentinel::telemetry::aggregateProcesses;
-using sentinel::telemetry::selectTopProcesses;
+using sentinel::telemetry::selectProcessGroups;
 
 namespace {
 
@@ -64,7 +64,7 @@ TEST(EventAttribution, HighCpuEventCapturesCursorAndWslContext) {
             process(3, L"VmmemWSL.exe", 4.0, 6000),
         },
     };
-    const auto selected = selectTopProcesses(aggregateProcesses(processes));
+    const auto selected = selectProcessGroups(aggregateProcesses(processes), 10, {});
 
     EventStore store;
     store.append(attachProcessContext(
@@ -110,7 +110,7 @@ TEST(EventAttribution, ContextRetainsOnlySelectedGroups) {
         process(4, L"memory.exe", 2.0, 100),
         process(5, L"small.exe", 0.0, 0),
     };
-    auto selected = selectTopProcesses(aggregateProcesses(processes), 1);
+    auto selected = selectProcessGroups(aggregateProcesses(processes), 1, {L"Cursor", L"WSL"});
     const DetectionEvent detection{.type = EventType::SamplingDelay};
     EventStore store;
     store.append(attachProcessContext(detection, {}, &selected));

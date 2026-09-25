@@ -64,9 +64,11 @@ ProcessGroupSnapshot aggregateProcesses(const ProcessSnapshot& snapshot) {
     return result;
 }
 
-ProcessGroupSnapshot selectTopProcesses(ProcessGroupSnapshot snapshot, std::size_t topPerMetric) {
+ProcessGroupSnapshot selectProcessGroups(ProcessGroupSnapshot snapshot, std::size_t topPerMetric,
+    const std::vector<std::wstring>& pinnedGroups) {
     const std::size_t count = std::min(topPerMetric, snapshot.groups.size());
-    std::unordered_set<std::wstring> keep{L"Cursor", L"WSL"};
+    std::unordered_set<std::wstring> keep;
+    for (const auto& name : pinnedGroups) keep.insert(lower(processGroupName(name)));
 
     auto byCpu = snapshot.groups;
     std::sort(byCpu.begin(), byCpu.end(), [](const auto& left, const auto& right) {
@@ -75,7 +77,7 @@ ProcessGroupSnapshot selectTopProcesses(ProcessGroupSnapshot snapshot, std::size
         return leftCpu == rightCpu ? left.name < right.name : leftCpu > rightCpu;
     });
     for (std::size_t index = 0; index < count; ++index) {
-        keep.insert(byCpu[index].name);
+        keep.insert(lower(byCpu[index].name));
     }
 
     auto byMemory = snapshot.groups;
@@ -85,11 +87,11 @@ ProcessGroupSnapshot selectTopProcesses(ProcessGroupSnapshot snapshot, std::size
                    : left.workingSetBytes > right.workingSetBytes;
     });
     for (std::size_t index = 0; index < count; ++index) {
-        keep.insert(byMemory[index].name);
+        keep.insert(lower(byMemory[index].name));
     }
 
     std::erase_if(snapshot.groups, [&](const ProcessGroup& group) {
-        return !keep.contains(group.name);
+        return !keep.contains(lower(group.name));
     });
     return snapshot;
 }

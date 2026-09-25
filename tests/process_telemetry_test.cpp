@@ -1,3 +1,4 @@
+#include "monitoring_config.h"
 #include "storage/process_history.h"
 #include "telemetry/process_aggregator.h"
 #include "telemetry/process_collector.h"
@@ -25,9 +26,25 @@ using sentinel::telemetry::SampleTime;
 using sentinel::telemetry::aggregateProcesses;
 using sentinel::telemetry::formatProcessSummary;
 using sentinel::telemetry::processCpuUsagePercent;
-using sentinel::telemetry::selectTopProcesses;
+using sentinel::telemetry::selectProcessGroups;
 
 namespace {
+
+TEST(MonitoringConfig, RejectsInvalidRuntimeSettings) {
+    sentinel::MonitoringConfig config;
+    EXPECT_NO_THROW(config.validate());
+    config.sampleInterval = std::chrono::milliseconds::zero();
+    EXPECT_THROW(config.validate(), std::invalid_argument);
+    config.sampleInterval = std::chrono::milliseconds(1000);
+    config.inMemoryHistorySize = 0;
+    EXPECT_THROW(config.validate(), std::invalid_argument);
+    config.inMemoryHistorySize = 300;
+    config.retentionPeriod = std::chrono::days::zero();
+    EXPECT_THROW(config.validate(), std::invalid_argument);
+    config.retentionPeriod = std::chrono::days(30);
+    config.maxDatabaseSizeMiB = 0;
+    EXPECT_THROW(config.validate(), std::invalid_argument);
+}
 
 RawProcessObservation raw(
     std::uint32_t pid,
@@ -174,7 +191,7 @@ TEST(ProcessAggregator, MixedCpuBaselinesDoNotUnderreportAnApplication) {
     EXPECT_EQ(grouped.groups[0].workingSetBytes, 3072u);
 }
 
-TEST(ProcessAggregator, RetainsWatchedGroupsAndTopCpuAndMemory) {
+TEST(ProcessAggregator, RetainsPinnedGroupsAndTopCpuAndMemory) {
     ProcessGroupSnapshot snapshot;
     snapshot.groups = {
         {.name = L"Cursor", .cpuUsagePercent = 1.0, .workingSetBytes = 1},
@@ -184,12 +201,26 @@ TEST(ProcessAggregator, RetainsWatchedGroupsAndTopCpuAndMemory) {
         {.name = L"small.exe", .cpuUsagePercent = 0.0, .workingSetBytes = 0},
     };
 
-    const auto selected = selectTopProcesses(std::move(snapshot), 1);
+    const auto selected = selectProcessGroups(std::move(snapshot), 1, {L"cursor.exe", L"vmmemwsl.exe"});
     ASSERT_EQ(selected.groups.size(), 4u);
     EXPECT_EQ(selected.groups[0].name, L"Cursor");
     EXPECT_EQ(selected.groups[1].name, L"WSL");
     EXPECT_EQ(selected.groups[2].name, L"cpu.exe");
     EXPECT_EQ(selected.groups[3].name, L"memory.exe");
+}
+
+TEST(ProcessAggregator, UnpinnedGroupsHaveNoSpecialTreatment) {
+    ProcessGroupSnapshot snapshot;
+    snapshot.groups = {
+        {.name = L"Cursor", .cpuUsagePercent = 1.0, .workingSetBytes = 1},
+        {.name = L"WSL", .cpuUsagePercent = 1.0, .workingSetBytes = 1},
+        {.name = L"cpu.exe", .cpuUsagePercent = 50.0, .workingSetBytes = 2},
+        {.name = L"memory.exe", .cpuUsagePercent = 2.0, .workingSetBytes = 100},
+    };
+    const auto selected = selectProcessGroups(std::move(snapshot), 1, {});
+    ASSERT_EQ(selected.groups.size(), 2u);
+    EXPECT_EQ(selected.groups[0].name, L"cpu.exe");
+    EXPECT_EQ(selected.groups[1].name, L"memory.exe");
 }
 
 TEST(ProcessHistory, DropsOldestSnapshotAtCapacity) {

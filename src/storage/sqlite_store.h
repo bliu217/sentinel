@@ -72,11 +72,13 @@ private:
 
 class RetentionManager {
 public:
-    explicit RetentionManager(SQLiteStore& store) : store_(store) {}
+    RetentionManager(SQLiteStore& store, std::chrono::days retentionPeriod)
+        : store_(store), retentionPeriod_(retentionPeriod) {}
     void pruneOnStartup(std::chrono::system_clock::time_point now);
 
 private:
     SQLiteStore& store_;
+    std::chrono::days retentionPeriod_;
 };
 
 }  // namespace sentinel::storage

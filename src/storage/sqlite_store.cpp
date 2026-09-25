@@ -415,7 +415,7 @@ std::vector<StoredTick> SQLiteStore::readTicks(
                 }
                 legacyProcesses->reset();
                 if (!legacy.processes.empty()) {
-                    *tick.processContext = telemetry::selectTopProcesses(telemetry::aggregateProcesses(legacy));
+                    *tick.processContext = telemetry::aggregateProcesses(legacy);
                 }
             }
         }
@@ -457,7 +457,7 @@ std::vector<StoredTick> SQLiteStore::readTicks(
 }
 
 void RetentionManager::pruneOnStartup(Clock::time_point now) {
-    store_.pruneBefore(now - std::chrono::hours(24 * 30));
+    store_.pruneBefore(now - retentionPeriod_);
     store_.enforceCap();
 }
 

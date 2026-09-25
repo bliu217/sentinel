@@ -1,5 +1,6 @@
 #include "attribution/anomaly_event.h"
 #include "detection/anomaly_detector.h"
+#include "monitoring_config.h"
 #include "storage/event_store.h"
 #include "storage/archive_manager.h"
 #include "storage/process_history.h"
@@ -13,7 +14,6 @@
 #include <chrono>
 #include <iostream>
 #include <filesystem>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -171,31 +171,31 @@ void printUsage() {
 }
 
 [[nodiscard]] int startCommand(int argc, char* argv[], const std::filesystem::path& data) {
-    std::uint64_t maxMiB = 2048;
+    sentinel::MonitoringConfig config;
     if (argc != 2) {
         if (argc != 4 || std::string_view(argv[2]) != "--max-db-size-mib") {
             printUsage(); return 1;
         }
         const std::string value = argv[3];
         std::size_t consumed = 0;
-        maxMiB = std::stoull(value, &consumed);
-        if (consumed != value.size() || maxMiB < 1 || maxMiB >
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / (1024 * 1024))) {
+        config.maxDatabaseSizeMiB = std::stoull(value, &consumed);
+        if (consumed != value.size()) {
             throw std::invalid_argument("Invalid database size cap");
         }
     }
+    config.validate();
     if (SetConsoleCtrlHandler(onConsoleCtrl, TRUE) == 0) {
         throw std::runtime_error("Failed to register console control handler");
     }
     std::filesystem::create_directories(data / "archive");
     std::filesystem::create_directories(data / "exports");
-    sentinel::storage::SQLiteStore database(data / "sentinel.db", maxMiB * 1024 * 1024);
-    sentinel::storage::RetentionManager retention(database);
+    sentinel::storage::SQLiteStore database(data / "sentinel.db", config.maxDatabaseSizeMiB * 1024 * 1024);
+    sentinel::storage::RetentionManager retention(database, config.retentionPeriod);
     retention.pruneOnStartup(std::chrono::system_clock::now());
     sentinel::telemetry::SystemCollector collector;
     sentinel::telemetry::ProcessCollector processCollector;
-    sentinel::storage::RingBuffer samples(300);
-    sentinel::storage::ProcessHistory processHistory(300);
+    sentinel::storage::RingBuffer samples(config.inMemoryHistorySize);
+    sentinel::storage::ProcessHistory processHistory(config.inMemoryHistorySize);
     sentinel::detection::AnomalyDetector detector;
     sentinel::storage::EventStore eventStore(&database);
     using Clock = std::chrono::steady_clock;
@@ -205,22 +205,23 @@ void printUsage() {
         const auto sample = collector.collect();
         const auto processSnapshot = processCollector.collect();
         if (sample) samples.push(*sample);
-        std::optional<sentinel::telemetry::ProcessGroupSnapshot> selectedProcesses;
+        std::optional<sentinel::telemetry::ProcessGroupSnapshot> selectedProcessGroups;
         if (processSnapshot) {
-            selectedProcesses = sentinel::telemetry::selectTopProcesses(
-                sentinel::telemetry::aggregateProcesses(*processSnapshot));
-            processHistory.push(*selectedProcesses);
+            selectedProcessGroups = sentinel::telemetry::selectProcessGroups(
+                sentinel::telemetry::aggregateProcesses(*processSnapshot),
+                config.topProcessGroupsPerMetric, config.pinnedProcessGroups);
+            processHistory.push(*selectedProcessGroups);
         }
         if (sample) {
             const sentinel::telemetry::SampleTime observedAt{sample->timestamp, sample->utcTimestamp};
             for (auto& detection : detector.analyze(*sample)) {
                 eventStore.append(sentinel::attribution::attachProcessContext(
                     std::move(detection), observedAt,
-                    selectedProcesses ? &*selectedProcesses : nullptr));
+                    selectedProcessGroups ? &*selectedProcessGroups : nullptr));
             }
         }
-        if (sample || selectedProcesses) eventStore.commitTick(tickUtc, sample, selectedProcesses);
-        nextTick += std::chrono::seconds(1);
+        if (sample || selectedProcessGroups) eventStore.commitTick(tickUtc, sample, selectedProcessGroups);
+        nextTick += config.sampleInterval;
         std::this_thread::sleep_until(nextTick);
     }
     return 0;
