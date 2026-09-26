@@ -149,7 +149,7 @@ function Invoke-BenchmarkRun {
     while (-not $process.HasExited) {
         if ($started.ElapsedMilliseconds -gt $hardTimeoutMs) {
             try { $process.Kill() } catch {}
-            $stopMethod = 'terminated'
+            $stopMethod = $(if ($UseLegacy) { 'duration-elapsed' } else { 'terminated' })
             break
         }
         $waitMs = [int][Math]::Ceiling(($nextSample - [DateTime]::UtcNow).TotalMilliseconds)
@@ -250,7 +250,7 @@ function Invoke-BenchmarkRun {
     if ($stopMethod -eq 'terminated') {
         throw "Sentinel did not exit on its own. See $stderrPath"
     }
-    if ($null -eq $exitCode -or $exitCode -ne 0) {
+    if (($null -eq $exitCode -or $exitCode -ne 0) -and $stopMethod -ne 'duration-elapsed') {
         $stderrText = [System.IO.File]::ReadAllText($stderrPath)
         throw "Sentinel exited with code $exitCode. $stderrText"
     }

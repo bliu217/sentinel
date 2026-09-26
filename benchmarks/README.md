@@ -112,6 +112,8 @@ powershell -ExecutionPolicy Bypass -File .\benchmarks\run_benchmark.ps1 `
 
 `-Legacy` launches `sentinel start` with no benchmark flags. Those binaries do not accept `--interval-ms` or `--benchmark`, and their built-in interval is 1000 ms. The harness records external CPU and memory only. `analyze.py` leaves scheduling columns as `n/a` instead of inventing delays.
 
+Legacy binaries have no benchmark duration flag, so the harness stops them when the requested duration elapses. Their metadata records `stop_method: duration-elapsed`; the resulting nonzero process exit code is expected.
+
 `-Legacy` cannot be combined with `-Suite`, and it rejects any interval other than 1000 ms so a historical run is not labeled as 10 ms or 100 ms sampling.
 
 ## Measurement definitions
