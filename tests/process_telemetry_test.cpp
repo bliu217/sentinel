@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -99,6 +100,14 @@ TEST(ProcessCollector, SamplesItsOwnProcessAcrossTwoTicks) {
     const auto firstSelf = findSelf(*first);
     ASSERT_NE(firstSelf, first->processes.end());
     EXPECT_FALSE(firstSelf->cpuUsagePercent.has_value());
+    wchar_t executablePath[MAX_PATH]{};
+    const DWORD pathLength = GetModuleFileNameW(nullptr, executablePath, MAX_PATH);
+    ASSERT_GT(pathLength, 0u);
+    ASSERT_LT(pathLength, static_cast<DWORD>(MAX_PATH));
+    const std::wstring_view fullPath(executablePath, pathLength);
+    const auto separator = fullPath.find_last_of(L"\\/");
+    EXPECT_EQ(firstSelf->imageName, fullPath.substr(
+        separator == std::wstring_view::npos ? 0 : separator + 1));
 
     Sleep(20);
     const auto second = collector.collect();
