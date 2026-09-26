@@ -11,10 +11,17 @@
 #include "telemetry/process_collector.h"
 #include "telemetry/system_collector.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -39,9 +46,136 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
 void printUsage() {
     std::cerr << "Usage:\n"
               << "  sentinel start [--max-db-size-mib N]\n"
+              << "  sentinel start --benchmark --interval-ms N --benchmark-output FILE\n"
+              << "      [--benchmark-duration-sec N] [--data-dir DIR] [--max-db-size-mib N]\n"
               << "  sentinel archive create SLUG --name NAME\n"
               << "  sentinel archive add SLUG --from UTC --to UTC [--app EXE]... "
                  "[--events cpu,memory,collection-lag] [--include-samples]\n";
+}
+
+class BenchmarkTimingLog {
+public:
+    explicit BenchmarkTimingLog(const std::filesystem::path& path)
+        : out_(path, std::ios::binary | std::ios::trunc) {
+        if (!out_) throw std::runtime_error("Cannot open benchmark timing log");
+        buffer_.reserve(8192);
+        buffer_.append("sample_index,target_interval_ms,delay_ms\n");
+    }
+
+    BenchmarkTimingLog(const BenchmarkTimingLog&) = delete;
+    BenchmarkTimingLog& operator=(const BenchmarkTimingLog&) = delete;
+
+    ~BenchmarkTimingLog() {
+        try {
+            flush();
+        } catch (...) {
+        }
+    }
+
+    void record(std::uint64_t index, std::int64_t intervalMs, double delayMs) {
+        char line[96];
+        const int written = std::snprintf(
+            line, sizeof(line), "%llu,%lld,%.3f\n",
+            static_cast<unsigned long long>(index),
+            static_cast<long long>(intervalMs), delayMs);
+        if (written <= 0) throw std::runtime_error("Failed to format benchmark timing row");
+        buffer_.append(line, static_cast<std::size_t>(written));
+        if (++pending_ >= 64 || buffer_.size() >= 32768) flush();
+    }
+
+private:
+    void flush() {
+        if (!out_ || buffer_.empty()) return;
+        out_ << buffer_;
+        out_.flush();
+        if (!out_) throw std::runtime_error("Failed to write benchmark timing log");
+        buffer_.clear();
+        pending_ = 0;
+    }
+
+    std::ofstream out_;
+    std::string buffer_;
+    std::size_t pending_{0};
+};
+
+[[nodiscard]] std::string requireValue(int& index, int argc, char* argv[]);
+
+[[nodiscard]] std::uint64_t parseWholeNumber(const std::string& value, const char* message) {
+    if (value.empty() ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+        throw std::invalid_argument(message);
+    }
+    try {
+        const unsigned long long parsed = std::stoull(value);
+        if (parsed == 0 ||
+            parsed > static_cast<unsigned long long>(std::numeric_limits<std::int64_t>::max())) {
+            throw std::invalid_argument(message);
+        }
+        return static_cast<std::uint64_t>(parsed);
+    } catch (const std::invalid_argument&) {
+        throw std::invalid_argument(message);
+    } catch (const std::out_of_range&) {
+        throw std::invalid_argument(message);
+    }
+}
+
+struct StartOptions {
+    sentinel::MonitoringConfig config{};
+    bool benchmark{false};
+    bool hasBenchmarkOutput{false};
+    bool hasDataDirectory{false};
+    bool hasDuration{false};
+    bool hasInterval{false};
+    std::filesystem::path benchmarkOutput;
+    std::filesystem::path dataDirectory;
+    std::chrono::seconds benchmarkDuration{0};
+};
+
+[[nodiscard]] StartOptions parseStartOptions(int argc, char* argv[]) {
+    StartOptions options;
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view option = argv[index];
+        if (option == "--benchmark") {
+            if (options.benchmark) throw std::invalid_argument("Duplicate --benchmark");
+            options.benchmark = true;
+        } else if (option == "--interval-ms") {
+            if (options.hasInterval) throw std::invalid_argument("Duplicate --interval-ms");
+            const auto intervalMs = parseWholeNumber(requireValue(index, argc, argv), "Invalid sampling interval");
+            options.config.sampleInterval = std::chrono::milliseconds(intervalMs);
+            options.hasInterval = true;
+        } else if (option == "--benchmark-output") {
+            if (options.hasBenchmarkOutput) throw std::invalid_argument("Duplicate --benchmark-output");
+            options.benchmarkOutput = requireValue(index, argc, argv);
+            if (options.benchmarkOutput.empty()) throw std::invalid_argument("Missing benchmark output path");
+            options.hasBenchmarkOutput = true;
+        } else if (option == "--benchmark-duration-sec") {
+            if (options.hasDuration) throw std::invalid_argument("Duplicate --benchmark-duration-sec");
+            const auto seconds = parseWholeNumber(requireValue(index, argc, argv), "Invalid benchmark duration");
+            if (seconds > 24 * 60 * 60) throw std::invalid_argument("Invalid benchmark duration");
+            options.benchmarkDuration = std::chrono::seconds(seconds);
+            options.hasDuration = true;
+        } else if (option == "--data-dir") {
+            if (options.hasDataDirectory) throw std::invalid_argument("Duplicate --data-dir");
+            options.dataDirectory = requireValue(index, argc, argv);
+            if (options.dataDirectory.empty()) throw std::invalid_argument("Missing benchmark data directory");
+            options.hasDataDirectory = true;
+        } else if (option == "--max-db-size-mib") {
+            const std::string value = requireValue(index, argc, argv);
+            std::size_t consumed = 0;
+            options.config.maxDatabaseSizeMiB = std::stoull(value, &consumed);
+            if (consumed != value.size()) throw std::invalid_argument("Invalid database size cap");
+        } else {
+            throw std::invalid_argument("Unknown start option: " + std::string(option));
+        }
+    }
+    if (options.benchmark) {
+        if (!options.hasInterval) throw std::invalid_argument("--benchmark requires --interval-ms");
+        if (!options.hasBenchmarkOutput) throw std::invalid_argument("--benchmark requires --benchmark-output");
+    } else if (options.hasInterval || options.hasBenchmarkOutput || options.hasDuration || options.hasDataDirectory) {
+        throw std::invalid_argument("Benchmark options require --benchmark");
+    }
+    options.config.validate();
+    return options;
 }
 
 [[nodiscard]] std::chrono::system_clock::time_point parseUtc(const std::string& text) {
@@ -165,25 +299,26 @@ void printUsage() {
 }
 
 [[nodiscard]] int startCommand(int argc, char* argv[]) {
-    sentinel::MonitoringConfig config;
-    if (argc != 2) {
-        if (argc != 4 || std::string_view(argv[2]) != "--max-db-size-mib") {
-            printUsage(); return 1;
-        }
-        const std::string value = argv[3];
-        std::size_t consumed = 0;
-        config.maxDatabaseSizeMiB = std::stoull(value, &consumed);
-        if (consumed != value.size()) {
-            throw std::invalid_argument("Invalid database size cap");
-        }
-    }
-    config.validate();
+    const StartOptions options = parseStartOptions(argc, argv);
+    const sentinel::MonitoringConfig& config = options.config;
     if (SetConsoleCtrlHandler(onConsoleCtrl, TRUE) == 0) {
         throw std::runtime_error("Failed to register console control handler");
     }
-    std::filesystem::create_directories(sentinel::paths::localDataDirectory());
-    std::filesystem::create_directories(sentinel::paths::exportsDirectory());
-    sentinel::storage::SQLiteStore database(sentinel::paths::databasePath(),
+    const std::filesystem::path dataDirectory = options.hasDataDirectory
+        ? options.dataDirectory
+        : sentinel::paths::localDataDirectory();
+    const std::filesystem::path databasePath = options.hasDataDirectory
+        ? dataDirectory / L"sentinel.db"
+        : sentinel::paths::databasePath();
+    const std::filesystem::path exportsDirectory = options.hasDataDirectory
+        ? dataDirectory / L"exports"
+        : sentinel::paths::exportsDirectory();
+    std::filesystem::create_directories(dataDirectory);
+    std::filesystem::create_directories(exportsDirectory);
+    if (options.hasBenchmarkOutput && options.benchmarkOutput.has_parent_path()) {
+        std::filesystem::create_directories(options.benchmarkOutput.parent_path());
+    }
+    sentinel::storage::SQLiteStore database(databasePath,
         config.maxDatabaseSizeMiB * 1024 * 1024);
     sentinel::storage::RetentionManager retention(database, config.retentionPeriod);
     retention.pruneOnStartup(std::chrono::system_clock::now());
@@ -193,9 +328,20 @@ void printUsage() {
     sentinel::storage::ProcessHistory processHistory(config.inMemoryHistorySize);
     sentinel::detection::AnomalyDetector detector;
     sentinel::storage::EventStore eventStore(&database);
+    std::unique_ptr<BenchmarkTimingLog> timing;
+    if (options.benchmark) timing = std::make_unique<BenchmarkTimingLog>(options.benchmarkOutput);
     using Clock = std::chrono::steady_clock;
     auto nextTick = Clock::now();
+    std::optional<Clock::time_point> runDeadline;
+    if (timing && options.hasDuration) runDeadline = nextTick + options.benchmarkDuration;
+    std::uint64_t sampleIndex = 0;
     while (g_running.load(std::memory_order_relaxed)) {
+        if (timing) {
+            const auto actualStart = Clock::now();
+            if (runDeadline && actualStart >= *runDeadline) break;
+            const auto delay = std::chrono::duration<double, std::milli>(actualStart - nextTick);
+            timing->record(++sampleIndex, config.sampleInterval.count(), delay.count());
+        }
         const auto tickUtc = std::chrono::system_clock::now();
         const auto sample = collector.collect();
         const auto processSnapshot = processCollector.collect();

@@ -21,12 +21,26 @@
         "CMAKE_CXX_COMPILER": "cl",
         "SENTINEL_BUILD_TESTS": "ON"
       }
+    },
+    {
+      "name": "windows-msvc-ninja-release",
+      "displayName": "Windows MSVC + Ninja (Release)",
+      "inherits": "windows-msvc-ninja",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SENTINEL_BUILD_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "windows-msvc-ninja",
       "configurePreset": "windows-msvc-ninja"
+    },
+    {
+      "name": "windows-msvc-ninja-release",
+      "configurePreset": "windows-msvc-ninja-release"
     }
   ],
   "testPresets": [

@@ -1,5 +1,7 @@
 /build/
+/build-release/
 /data/
 /out/
 /.vs/
 /CMakeUserPresets.json
+/benchmarks/results/
