@@ -4,9 +4,10 @@
 
 #include <windows.h>
 #include <psapi.h>
-#include <tlhelp32.h>
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -47,8 +48,8 @@ private:
     return true;
 }
 
-[[nodiscard]] bool readProcess(const PROCESSENTRY32W& entry, RawProcessObservation& out) {
-    UniqueHandle handle(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID));
+[[nodiscard]] bool readProcess(DWORD processId, std::vector<wchar_t>& imagePath, RawProcessObservation& out) {
+    UniqueHandle handle(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId));
     if (!handle.valid()) {
         return false;
     }
@@ -68,9 +69,22 @@ private:
         return false;
     }
 
+    DWORD pathLength{};
+    for (;;) {
+        pathLength = static_cast<DWORD>(imagePath.size());
+        if (QueryFullProcessImageNameW(handle.get(), 0, imagePath.data(), &pathLength) != 0) break;
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || imagePath.size() >= 32768) return false;
+        imagePath.resize(imagePath.size() * 2);
+    }
+    if (pathLength == 0) return false;
+    const std::wstring_view fullPath(imagePath.data(), pathLength);
+    const auto separator = fullPath.find_last_of(L"\\/");
+    const std::wstring_view imageName = fullPath.substr(
+        separator == std::wstring_view::npos ? 0 : separator + 1);
+
     out = RawProcessObservation{
-        .identity = {entry.th32ProcessID, asU64(created)},
-        .imageName = entry.szExeFile,
+        .identity = {processId, asU64(created)},
+        .imageName = std::wstring(imageName),
         .cpuTime = asU64(kernel) + asU64(user),
         .workingSetBytes = static_cast<std::uint64_t>(memory.WorkingSetSize),
         .privateBytes = static_cast<std::uint64_t>(memory.PrivateUsage),
@@ -84,24 +98,23 @@ std::optional<ProcessSnapshot> ProcessCollector::collect() {
     // Serialize reads and baseline updates so concurrent callers preserve counter order.
     std::lock_guard lock(mutex_);
 
-    UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-    if (!snapshot.valid()) {
-        return std::nullopt;
-    }
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    if (Process32FirstW(snapshot.get(), &entry) == 0) {
-        return std::nullopt;
+    std::vector<DWORD> processIds(1024);
+    DWORD bytesReturned{};
+    for (;;) {
+        const DWORD bufferBytes = static_cast<DWORD>(processIds.size() * sizeof(DWORD));
+        if (EnumProcesses(processIds.data(), bufferBytes, &bytesReturned) == 0) return std::nullopt;
+        if (bytesReturned < bufferBytes) break;
+        processIds.resize(processIds.size() * 2);
     }
 
     std::vector<RawProcessObservation> observations;
-    do {
+    std::vector<wchar_t> imagePath(1024);
+    for (std::size_t index = 0; index < bytesReturned / sizeof(DWORD); ++index) {
         RawProcessObservation observation;
-        if (readProcess(entry, observation)) {
+        if (readProcess(processIds[index], imagePath, observation)) {
             observations.push_back(std::move(observation));
         }
-    } while (Process32NextW(snapshot.get(), &entry) != 0);
+    }
 
     std::uint64_t systemCpuTime{};
     if (!readSystemCpuTime(systemCpuTime)) {
