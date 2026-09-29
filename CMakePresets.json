@@ -15,10 +15,12 @@
         "value": "x64",
         "strategy": "external"
       },
+      "environment": {
+        "CC": "cl",
+        "CXX": "cl"
+      },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "cl",
-        "CMAKE_CXX_COMPILER": "cl",
         "SENTINEL_BUILD_TESTS": "ON"
       }
     }
