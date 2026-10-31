@@ -24,42 +24,8 @@ FetchContent_Declare(nlohmann_json
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(nlohmann_json)
 
-add_library(sentinel_telemetry STATIC
-    src/paths.cpp
-    src/telemetry/system_collector.cpp
-    src/telemetry/process_collector.cpp
-    src/telemetry/process_tracker.cpp
-    src/telemetry/process_aggregator.cpp
-    src/storage/ring_buffer.cpp
-    src/storage/process_history.cpp
-    src/storage/event_store.cpp
-    src/storage/sqlite_store.cpp
-    src/storage/archive_manager.cpp
-    src/attribution/anomaly_event.cpp
-    src/detection/anomaly_detector.cpp
-)
-target_include_directories(sentinel_telemetry PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(sentinel_telemetry PUBLIC sentinel_sqlite nlohmann_json::nlohmann_json)
-if(WIN32)
-    target_link_libraries(sentinel_telemetry PUBLIC Psapi Shell32 Ole32)
-endif()
-
-if(MSVC)
-    target_compile_options(sentinel_telemetry PUBLIC /W4 /permissive-)
-    target_compile_definitions(sentinel_telemetry PUBLIC
-        UNICODE
-        _UNICODE
-        WIN32_LEAN_AND_MEAN
-        NOMINMAX
-    )
-endif()
-
-add_executable(sentinel src/main.cpp)
-target_link_libraries(sentinel PRIVATE sentinel_telemetry)
-
 option(SENTINEL_BUILD_TESTS "Build unit tests" ON)
 if(SENTINEL_BUILD_TESTS)
-    include(FetchContent)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
@@ -67,19 +33,8 @@ if(SENTINEL_BUILD_TESTS)
     )
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
-
     enable_testing()
-    add_executable(sentinel_tests
-        tests/cpu_math_test.cpp
-        tests/process_telemetry_test.cpp
-        tests/ring_buffer_test.cpp
-        tests/anomaly_detector_test.cpp
-        tests/event_store_test.cpp
-        tests/event_attribution_test.cpp
-        tests/persistence_test.cpp
-    )
-    target_link_libraries(sentinel_tests PRIVATE sentinel_telemetry GTest::gtest_main)
-    include(GoogleTest)
-    set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
-    gtest_discover_tests(sentinel_tests)
 endif()
+
+add_subdirectory(engine)
+add_subdirectory(apps/cli)

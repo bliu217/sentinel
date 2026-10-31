@@ -1,0 +1,25 @@
+#include "sentinel/storage/event_store.h"
+#include "sentinel/storage/sqlite_store.h"
+
+#include <utility>
+
+namespace sentinel::storage {
+
+void EventStore::append(attribution::AnomalyEvent event) {
+    events_.push_back(std::move(event));
+}
+
+void EventStore::commitTick(
+    std::chrono::system_clock::time_point tickUtc,
+    const std::optional<telemetry::SystemSample>& system,
+    const std::optional<telemetry::ProcessGroupSnapshot>& processContext) {
+    if (persistentStore_ == nullptr) return;
+    persistentStore_->writeTick(tickUtc, system, processContext, events_);
+    events_.clear();
+}
+
+const std::vector<attribution::AnomalyEvent>& EventStore::events() const noexcept {
+    return events_;
+}
+
+}  // namespace sentinel::storage

@@ -69,6 +69,19 @@ System and process samples include a UTC timestamp for persistence while keeping
 
 The monitor writes each available system sample, the selected process groups, and every anomaly event with its captured process-group context to SQLite in one transaction per tick. Selection keeps the top 10 by CPU, the top 10 by working set, and any configured pinned groups, with duplicates stored once. New ticks do not store per-PID process rows. Events keep both the original episode timestamp and the later observation timestamp. The permanent project archive uses compact JSONL, with one anomaly or sample per line and a manifest describing the project.
 
+## Repository layout
+
+- `engine/include/sentinel/`: public C++ headers, included as `sentinel/...`.
+- `engine/src/`: telemetry collectors, detection, attribution, storage, and Windows data paths.
+- `engine/tests/`: engine unit and integration tests.
+- `apps/cli/`: the `sentinel` command-line executable.
+- `benchmarks/`: performance measurements and reports.
+
+The root CMake project coordinates the engine and CLI. The engine builds as
+`sentinel_engine`; `sentinel_telemetry` remains a CMake alias. Executables retain
+their existing paths in the build directory. The planned desktop GUI and MCP
+adapter will live in `apps/desktop/` and `integrations/mcp/` when implemented.
+
 ## Build
 
 Toolchain: Visual Studio 2026 Build Tools (`cl`), CMake, Ninja, Windows SDK. Run these from an x64 Developer Command Prompt so `cl` is on `PATH` (MSYS `g++` must not win).
@@ -95,4 +108,4 @@ Sentinel stores runtime data under `%LOCALAPPDATA%\Sentinel\`, using Windows kno
 
 `archive create` makes a permanent project folder under the Windows Documents known folder at `Sentinel\investigations\`. `archive add` copies records from the half-open UTC range `[from, to)` into `anomalies.jsonl` and, when requested, `samples.jsonl`. Repeating the same selection does not duplicate records. Application names match case-insensitively. An anomaly record contains its captured process groups, while a sample record contains the selected process groups for that tick. An application filter selects matching groups; known executable names such as `cursor.exe` also match their group names. System samples remain in the chosen range. The manifest records project metadata, contents, and committed file lengths so an interrupted append can be repaired on the next add. Archives are not pruned with SQLite. Automatic archive rules and generated project READMEs are future work.
 
-See [tests/README.md](tests/README.md) for how tests are organized and how to run them.
+See [engine/tests/README.md](engine/tests/README.md) for how tests are organized and how to run them.
