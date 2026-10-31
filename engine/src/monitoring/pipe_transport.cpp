@@ -39,9 +39,9 @@ struct LocalDeleter {
 };
 using LocalMemory = std::unique_ptr<void, LocalDeleter>;
 
-[[nodiscard]] std::wstring getUserSid() {
+[[nodiscard]] std::wstring getUserSid(HANDLE process = GetCurrentProcess()) {
     HANDLE rawToken{};
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &rawToken)) {
+    if (!OpenProcessToken(process, TOKEN_QUERY, &rawToken)) {
         throw ConnectionError("Cannot read current Windows user token");
     }
     const Handle token(rawToken);
@@ -160,7 +160,10 @@ struct MonitoringOwner::Impl {
     void serve(HANDLE pipe) {
         while (WaitForSingleObject(stop.get(), 0) == WAIT_TIMEOUT) {
             try {
-                if (!acceptClient(pipe, stop.get())) continue;
+                if (!acceptClient(pipe, stop.get())) {
+                    DisconnectNamedPipe(pipe);
+                    continue;
+                }
                 std::string response = serializeStatus(read());
                 if (response.size() <= MAX_RESPONSE_BYTES) {
                     std::uint32_t size = static_cast<std::uint32_t>(response.size());
@@ -190,12 +193,19 @@ MonitoringStatus MonitoringClient::read() const {
     const ULONGLONG deadline = GetTickCount64() + IO_TIMEOUT_MS;
     Handle pipe;
     do {
-        pipe = Handle(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr));
+        pipe = Handle(CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr));
         if (pipe.isValid()) break;
         if (GetLastError() != ERROR_PIPE_BUSY) throw ConnectionError("Sentinel monitoring owner is unreachable");
         WaitNamedPipeW(name.c_str(), 50);
     } while (GetTickCount64() < deadline);
     if (!pipe.isValid()) throw ConnectionError("Sentinel monitoring owner connection timed out");
+    ULONG processId{};
+    if (!GetNamedPipeServerProcessId(pipe.get(), &processId)) throw ConnectionError("Cannot identify monitoring owner");
+    const Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
+    if (!process.isValid() || getUserSid(process.get()) != getUserSid()) {
+        throw ConnectionError("Monitoring endpoint does not belong to the current Windows user");
+    }
     std::uint32_t size{};
     if (!transfer(pipe.get(), &size, sizeof(size), false) || size == 0 || size > MAX_RESPONSE_BYTES) {
         throw ConnectionError("Invalid or interrupted monitoring response");

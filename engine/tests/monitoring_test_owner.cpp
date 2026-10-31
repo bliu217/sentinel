@@ -5,6 +5,16 @@
 
 /** Separate-process fixture; no test controls are added to the product CLI. */
 int wmain(int argc, wchar_t* argv[]) {
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--interrupt") {
+        const DWORD processId = static_cast<DWORD>(std::stoul(argv[2]));
+        FreeConsole();
+        if (!AttachConsole(processId)) return static_cast<int>(1000 + GetLastError());
+        SetConsoleCtrlHandler(nullptr, TRUE);
+        const BOOL sent = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+        Sleep(100);
+        FreeConsole();
+        return sent ? 0 : 6;
+    }
     if (argc != 4) return 2;
     const HANDLE stop = OpenEventW(SYNCHRONIZE, FALSE, argv[3]);
     if (!stop) return 3;

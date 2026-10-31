@@ -18,10 +18,13 @@ namespace {
 
 class ChildProcess {
 public:
-    explicit ChildProcess(std::wstring command) {
+    explicit ChildProcess(std::wstring command, bool hasConsole = false) {
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
-        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+        startup.dwFlags = STARTF_USESHOWWINDOW;
+        startup.wShowWindow = SW_HIDE;
+        if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                hasConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
                 nullptr, nullptr, &startup, &process_)) throw std::runtime_error("Cannot start test child");
         CloseHandle(process_.hThread);
     }
@@ -34,6 +37,7 @@ public:
     }
     ChildProcess(const ChildProcess&) = delete;
     ChildProcess& operator=(const ChildProcess&) = delete;
+    [[nodiscard]] DWORD getId() const noexcept { return process_.dwProcessId; }
     [[nodiscard]] DWORD wait() const {
         if (WaitForSingleObject(process_.hProcess, 5000) != WAIT_OBJECT_0) throw std::runtime_error("Test child timed out");
         DWORD code{};
@@ -391,6 +395,14 @@ TEST_F(MonitoringTest, PipeHasProtectedDaclGrantingOnlyCurrentUser) {
     ASSERT_TRUE(GetSecurityDescriptorControl(descriptor, &control, &revision));
     EXPECT_NE(control & SE_DACL_PROTECTED, 0);
     LocalFree(descriptor);
+    // Abandon connections before reading; the endpoint must continue serving real clients.
+    for (int index = 0; index < 100; ++index) {
+        const HANDLE abandoned = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+            nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (abandoned != INVALID_HANDLE_VALUE) CloseHandle(abandoned);
+        else WaitNamedPipeW(name.c_str(), 10);
+    }
+    EXPECT_EQ(MonitoringClient(channel).read().health.state, MonitoringState::Starting);
 }
 
 TEST_F(MonitoringTest, SeparateOwnerServesMultipleClientsAndReleasesOwnershipOnStop) {
@@ -444,6 +456,34 @@ TEST_F(MonitoringTest, RealStatusCommandsReadOwnerAndDuplicateStartIsRejected) {
     now += 1s;
     monitor.poll();
     EXPECT_EQ(MonitoringClient().read().snapshot->sequence, 2u);
+}
+
+TEST_F(MonitoringTest, ProductionCliEntryPointStopsOnCtrlCAndCanRestart) {
+    try {
+        static_cast<void>(MonitoringClient().read());
+        GTEST_SKIP() << "A monitoring owner already exists";
+    } catch (const ConnectionError&) {}
+    for (int restart = 0; restart < 2; ++restart) {
+        ChildProcess child(quote(executableDirectory() / "sentinel_test_cli.exe") + L" start", true);
+        std::optional<MonitoringStatus> status;
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            try { status = MonitoringClient().read(); if (status->snapshot) break; }
+            catch (const ConnectionError&) {}
+            std::this_thread::sleep_for(10ms);
+        }
+        ASSERT_TRUE(status);
+        ASSERT_TRUE(status->snapshot);
+        ChildProcess reader(quote(executableDirectory() / "sentinel.exe") + L" status");
+        EXPECT_EQ(reader.wait(), 0u);
+        ChildProcess interrupt(quote(executableDirectory() / "sentinel_test_owner.exe") + L" --interrupt " +
+            std::to_wstring(child.getId()));
+        EXPECT_EQ(interrupt.wait(), 0u);
+        EXPECT_EQ(child.wait(), 0u);
+        EXPECT_THROW(static_cast<void>(MonitoringClient().read()), ConnectionError);
+        std::filesystem::remove_all(std::filesystem::temp_directory_path() /
+            (L"sentinel-cli-test-" + std::to_wstring(child.getId())));
+    }
 }
 
 }  // namespace

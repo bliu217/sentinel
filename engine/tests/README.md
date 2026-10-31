@@ -51,7 +51,10 @@ budget replenishment, bounded diagnostics, log rotation/failure, concurrent read
 pipe access policy, and cooperative shutdown. A separate `sentinel_test_owner`
 fixture proves process independence and cleanup. Real `sentinel status` processes
 and duplicate `sentinel start` rejection are exercised without opening the user's
-telemetry database. The production endpoint test skips if an owner already exists.
+telemetry database. Production endpoint tests skip if an owner already exists. A test executable built
+from the unchanged production CLI entrypoint substitutes only data-path functions;
+it receives real Ctrl+C events in a hidden console, exits cleanly, and restarts
+without touching the user's database.
 The existing process collector smoke check remains enabled.
 
 `persistence_test.cpp` additionally covers stable tick replay after reopen,
