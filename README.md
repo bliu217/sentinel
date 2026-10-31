@@ -82,6 +82,13 @@ The root CMake project coordinates the engine and CLI. The engine builds as
 their existing paths in the build directory. The planned desktop GUI and MCP
 adapter will live in `apps/desktop/` and `integrations/mcp/` when implemented.
 
+The CLI now delegates monitoring to `MonitorRuntime`, which owns the worker,
+recorder lock, persistence, and bounded immutable tick history. It reports engine
+health, supports interruptible sampling waits, and skips missed deadlines after
+delays. See [architecture and implementation plan](docs/architecture.md) for
+component boundaries, current limitations, and the remaining engine work before
+the shared query interface.
+
 ## Build
 
 Toolchain: Visual Studio 2026 Build Tools (`cl`), CMake, Ninja, Windows SDK. Run these from an x64 Developer Command Prompt so `cl` is on `PATH` (MSYS `g++` must not win).
