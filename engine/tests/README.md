@@ -8,6 +8,7 @@ Framework: **GoogleTest** (v1.15.2 via CMake FetchContent) plus **CTest**. The t
 
 | File | What it checks |
 | --- | --- |
+| `runtime_test.cpp` | Bounded consistent ticks, persistence before publication, event attribution, interruptible shutdown, duplicate-recorder locking, unavailable readings, worker failures, skipped deadlines, and lifetime cleanup |
 | `cpu_math_test.cpp` | `fileTimeToU64` dword packing; CPU % for idle-only, busy-only, mixed load, zero delta, backwards counters, idle exceeding total |
 | `ring_buffer_test.cpp` | `RingBuffer` push/snapshot order, capacity-one and overflow behavior, snapshot copies, concurrent snapshots, and multiple writers |
 | `anomaly_detector_test.cpp` | CPU/memory episode confirmation, threshold boundaries, simultaneous anomalies, and sampling-delay detection |

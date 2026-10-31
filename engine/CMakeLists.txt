@@ -1,4 +1,5 @@
 add_library(sentinel_engine STATIC
+    src/runtime/monitor_runtime.cpp
     src/paths.cpp
     src/telemetry/system_collector.cpp
     src/telemetry/process_collector.cpp

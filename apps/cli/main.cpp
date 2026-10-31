@@ -1,15 +1,8 @@
-#include "sentinel/attribution/anomaly_event.h"
-#include "sentinel/detection/anomaly_detector.h"
 #include "sentinel/monitoring_config.h"
 #include "sentinel/paths.h"
-#include "sentinel/storage/event_store.h"
+#include "sentinel/runtime/monitor_runtime.h"
 #include "sentinel/storage/archive_manager.h"
-#include "sentinel/storage/process_history.h"
-#include "sentinel/storage/ring_buffer.h"
 #include "sentinel/storage/sqlite_store.h"
-#include "sentinel/telemetry/process_aggregator.h"
-#include "sentinel/telemetry/process_collector.h"
-#include "sentinel/telemetry/system_collector.h"
 
 #include <atomic>
 #include <chrono>
@@ -183,42 +176,16 @@ void printUsage() {
     }
     std::filesystem::create_directories(sentinel::paths::localDataDirectory());
     std::filesystem::create_directories(sentinel::paths::exportsDirectory());
-    sentinel::storage::SQLiteStore database(sentinel::paths::databasePath(),
-        config.maxDatabaseSizeMiB * 1024 * 1024);
-    sentinel::storage::RetentionManager retention(database, config.retentionPeriod);
-    retention.pruneOnStartup(std::chrono::system_clock::now());
-    sentinel::telemetry::SystemCollector collector;
-    sentinel::telemetry::ProcessCollector processCollector;
-    sentinel::storage::RingBuffer samples(config.inMemoryHistorySize);
-    sentinel::storage::ProcessHistory processHistory(config.inMemoryHistorySize);
-    sentinel::detection::AnomalyDetector detector;
-    sentinel::storage::EventStore eventStore(&database);
-    using Clock = std::chrono::steady_clock;
-    auto nextTick = Clock::now();
+    sentinel::runtime::MonitorRuntime runtime(config, sentinel::paths::databasePath());
+    runtime.start();
     while (g_running.load(std::memory_order_relaxed)) {
-        const auto tickUtc = std::chrono::system_clock::now();
-        const auto sample = collector.collect();
-        const auto processSnapshot = processCollector.collect();
-        if (sample) samples.push(*sample);
-        std::optional<sentinel::telemetry::ProcessGroupSnapshot> selectedProcessGroups;
-        if (processSnapshot) {
-            selectedProcessGroups = sentinel::telemetry::selectProcessGroups(
-                sentinel::telemetry::aggregateProcesses(*processSnapshot),
-                config.topProcessGroupsPerMetric, config.pinnedProcessGroups);
-            processHistory.push(*selectedProcessGroups);
-        }
-        if (sample) {
-            const sentinel::telemetry::SampleTime observedAt{sample->timestamp, sample->utcTimestamp};
-            for (auto& detection : detector.analyze(*sample)) {
-                eventStore.append(sentinel::attribution::attachProcessContext(
-                    std::move(detection), observedAt,
-                    selectedProcessGroups ? &*selectedProcessGroups : nullptr));
-            }
-        }
-        if (sample || selectedProcessGroups) eventStore.commitTick(tickUtc, sample, selectedProcessGroups);
-        nextTick += config.sampleInterval;
-        std::this_thread::sleep_until(nextTick);
+        const auto state = runtime.status().state;
+        if (state == sentinel::runtime::RuntimeState::Failed ||
+            state == sentinel::runtime::RuntimeState::Stopped) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+    runtime.requestStop();
+    runtime.wait();
     return 0;
 }
 

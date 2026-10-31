@@ -1,4 +1,5 @@
 add_executable(sentinel_tests
+    runtime_test.cpp
     cpu_math_test.cpp
     process_telemetry_test.cpp
     ring_buffer_test.cpp
