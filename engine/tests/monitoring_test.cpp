@@ -5,7 +5,10 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <nlohmann/json.hpp>
+#include <sqlite3.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -18,14 +21,29 @@ namespace {
 
 class ChildProcess {
 public:
-    explicit ChildProcess(std::wstring command, bool hasConsole = false) {
+    explicit ChildProcess(std::wstring command, bool hasConsole = false,
+        std::function<void(DWORD)> beforeRun = {}) {
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         startup.dwFlags = STARTF_USESHOWWINDOW;
         startup.wShowWindow = SW_HIDE;
         if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
-                hasConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
+                (hasConsole ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW) | (beforeRun ? CREATE_SUSPENDED : 0),
                 nullptr, nullptr, &startup, &process_)) throw std::runtime_error("Cannot start test child");
+        if (beforeRun) {
+            try {
+                beforeRun(process_.dwProcessId);
+                if (ResumeThread(process_.hThread) == static_cast<DWORD>(-1)) {
+                    throw std::runtime_error("Cannot resume test child");
+                }
+            } catch (...) {
+                TerminateProcess(process_.hProcess, 99);
+                WaitForSingleObject(process_.hProcess, 2000);
+                CloseHandle(process_.hThread);
+                CloseHandle(process_.hProcess);
+                throw;
+            }
+        }
         CloseHandle(process_.hThread);
     }
     ~ChildProcess() {
@@ -261,6 +279,165 @@ TEST_F(MonitoringTest, FourthBriefFailureExhaustsBudgetEvenAfterSuccessfulReopen
     EXPECT_EQ(client.read().health.recoveryAttempts, 3u);
 }
 
+TEST_F(MonitoringTest, RecoveryWithoutSavableCollectionExhaustsBudgetAndKeepsHealthReadable) {
+    Monitor monitor({}, directory / "diagnostics.log", inputs());
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    MonitoringClient client(channel);
+    monitor.poll();
+    hasWriteFailure = true;
+    now += 1s;
+    monitor.poll();
+    hasWriteFailure = false;
+    pass.system.sample.reset();
+    pass.system.report.operation = sentinel::telemetry::CollectionOperation::GetSystemTimes;
+    pass.processes.report.operation = sentinel::telemetry::CollectionOperation::EnumerateProcesses;
+    now += 1s;
+    monitor.poll();
+    const auto first = client.read();
+    EXPECT_EQ(first.health.state, MonitoringState::Recovering);
+    EXPECT_EQ(first.health.recoveryAttempts, 1u);
+    EXPECT_EQ(first.health.nextRecoveryUtcMs, 4000);
+    ASSERT_TRUE(first.snapshot);
+    EXPECT_EQ(first.snapshot->generation, 1u); // Only the old pending pass was saved.
+    now += 1999ms;
+    monitor.poll();
+    EXPECT_EQ(client.read().generation, first.generation);
+    now += 1ms;
+    monitor.poll();
+    EXPECT_EQ(client.read().health.nextRecoveryUtcMs, 8000);
+    now += 4s;
+    monitor.poll();
+    const auto failed = client.read();
+    EXPECT_EQ(failed.health.state, MonitoringState::Failed);
+    EXPECT_EQ(failed.health.recoveryAttempts, 3u);
+    EXPECT_EQ(failed.snapshot->sequence, first.snapshot->sequence);
+    EXPECT_FALSE(failed.health.nextRecoveryUtcMs);
+}
+
+TEST_F(MonitoringTest, RecoveryAllowsOneBaselinePassButRequiresANewSavedPass) {
+    Monitor monitor({}, directory / "diagnostics.log", inputs());
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    MonitoringClient client(channel);
+    monitor.poll();
+    hasWriteFailure = true;
+    now += 1s;
+    monitor.poll();
+    hasWriteFailure = false;
+    pass.system.sample.reset();
+    pass.system.report.isBaseline = true;
+    now += 1s;
+    monitor.poll();
+    const auto baseline = client.read();
+    EXPECT_EQ(baseline.health.state, MonitoringState::Recovering);
+    EXPECT_EQ(baseline.health.system.availability, Availability::Baseline);
+    EXPECT_FALSE(baseline.health.nextRecoveryUtcMs);
+    EXPECT_EQ(baseline.health.recoveryAttempts, 1u);
+    EXPECT_EQ(baseline.snapshot->generation, 1u);
+    pass.system.report = {};
+    pass.system.sample = sentinel::telemetry::SystemSample{.cpuUsagePercent = 12};
+    now += 1s;
+    monitor.poll();
+    const auto recovered = client.read();
+    EXPECT_EQ(recovered.health.state, MonitoringState::Operating);
+    EXPECT_EQ(recovered.generation, 2u);
+    EXPECT_EQ(recovered.snapshot->generation, 2u);
+    EXPECT_EQ(recovered.health.recoveryAttempts, 1u);
+    EXPECT_EQ(recovered.health.lastGapMilliseconds, 2000);
+}
+
+TEST_F(MonitoringTest, RepeatedBaselineOnlyPassesCannotKeepOneRecoveryAttemptAlive) {
+    Monitor monitor({}, directory / "diagnostics.log", inputs());
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    MonitoringClient client(channel);
+    monitor.poll();
+    hasWriteFailure = true;
+    now += 1s;
+    monitor.poll();
+    hasWriteFailure = false;
+    pass.system.sample.reset();
+    pass.system.report.isBaseline = true;
+    now += 1s;
+    monitor.poll();
+    EXPECT_FALSE(client.read().health.nextRecoveryUtcMs);
+    now += 1s;
+    monitor.poll();
+    EXPECT_EQ(client.read().health.nextRecoveryUtcMs, 5000);
+    EXPECT_EQ(client.read().health.recoveryAttempts, 1u);
+}
+
+TEST_F(MonitoringTest, RealSqliteRecoveryReplaysOnceAndDoesNotInventAnEpisodeEnding) {
+    struct SqliteEngine final : detail::MonitoringEngine {
+        sentinel::storage::SQLiteStore store;
+        const detail::SamplingPass& pass;
+        bool& loseAcknowledgement;
+        SqliteEngine(const std::filesystem::path& path, const detail::SamplingPass& input, bool& lose)
+            : store(path), pass(input), loseAcknowledgement(lose) {}
+        detail::SamplingPass collect() override { return pass; }
+        sentinel::storage::WriteResult save(const detail::PendingTick& tick) override {
+            auto result = store.saveTick(tick.identity, tick.utc, tick.system, tick.processes, tick.anomalies);
+            if (result.outcome == sentinel::storage::CommitOutcome::Committed && loseAcknowledgement) {
+                loseAcknowledgement = false;
+                return {sentinel::storage::CommitOutcome::Unresolved, "commit acknowledgement lost"};
+            }
+            return result;
+        }
+    };
+    const auto database = directory / "sentinel.db";
+    bool loseAcknowledgement = false;
+    auto runtime = inputs();
+    runtime.createEngine = [&] { return std::make_unique<SqliteEngine>(database, pass, loseAcknowledgement); };
+    Monitor monitor({}, directory / "diagnostics.log", std::move(runtime));
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    MonitoringClient client(channel);
+    pass.processes.sample.emplace();
+    pass.processes.sample->processes.push_back({.identity = {42, 100}, .imageName = L"Cursor.exe",
+        .cpuUsagePercent = 10, .workingSetBytes = 1000});
+    const auto collectAt = [&](int second, double cpu) {
+        now = std::chrono::steady_clock::time_point{std::chrono::seconds(second)};
+        pass.system.sample->timestamp = now;
+        pass.system.sample->utcTimestamp = std::chrono::system_clock::time_point{std::chrono::seconds(second)};
+        pass.system.sample->cpuUsagePercent = cpu;
+        pass.processes.sample->time = {now, pass.system.sample->utcTimestamp};
+        monitor.poll();
+    };
+    collectAt(0, 97);
+    collectAt(1, 97);
+    loseAcknowledgement = true;
+    collectAt(2, 97); // The high-CPU start commits, but its acknowledgement is lost.
+    ASSERT_EQ(client.read().health.state, MonitoringState::Recovering);
+    EXPECT_EQ(client.read().snapshot->tickUtcMs, 1000);
+    collectAt(3, 10);
+    ASSERT_EQ(client.read().health.state, MonitoringState::Operating);
+    EXPECT_EQ(client.read().snapshot->generation, 2u);
+    collectAt(4, 10);
+    collectAt(5, 10); // A new generation must not invent the old episode's end.
+    collectAt(6, 97);
+    collectAt(7, 97);
+    collectAt(8, 97);
+    sentinel::storage::SQLiteStore reader(database);
+    const auto ticks = reader.readTicks(std::chrono::system_clock::time_point{},
+        std::chrono::system_clock::time_point{9s});
+    ASSERT_EQ(ticks.size(), 9u);
+    unsigned starts = 0;
+    unsigned stops = 0;
+    for (const auto& tick : ticks) {
+        ASSERT_TRUE(tick.processContext);
+        EXPECT_EQ(tick.processContext->groups.size(), 1u);
+        for (const auto& event : tick.anomalies) {
+            if (event.type != sentinel::detection::EventType::HighCpu) continue;
+            if (event.state == sentinel::detection::EventState::Started) ++starts;
+            if (event.state == sentinel::detection::EventState::Stopped) ++stops;
+        }
+    }
+    EXPECT_EQ(starts, 2u);
+    EXPECT_EQ(stops, 0u);
+    const auto status = client.read();
+    EXPECT_TRUE(std::any_of(status.diagnostics.begin(), status.diagnostics.end(),
+        [](const Diagnostic& item) {
+            return item.operation == "recreate" && item.message.find("continuity interrupted") != std::string::npos;
+        }));
+}
+
 TEST_F(MonitoringTest, MaintenanceFailuresPublishButUnresolvedCommitsDoNot) {
     hasMaintenanceFailure = true;
     Monitor monitor({}, directory / "diagnostics.log", inputs());
@@ -284,7 +461,7 @@ TEST_F(MonitoringTest, MaintenanceFailuresPublishButUnresolvedCommitsDoNot) {
     EXPECT_EQ(saved.at(1).identity, committed.ownerId + ":2");
 }
 
-TEST_F(MonitoringTest, DiagnosticsStayBoundedRotateAndSurviveEngineRecreation) {
+TEST_F(MonitoringTest, DiagnosticsStayBoundedAndRotate) {
     pass.system.sample.reset();
     pass.system.report.operation = sentinel::telemetry::CollectionOperation::GetSystemTimes;
     pass.system.report.errorCode = 5;
@@ -305,6 +482,70 @@ TEST_F(MonitoringTest, DiagnosticsStayBoundedRotateAndSurviveEngineRecreation) {
     }
 }
 
+TEST_F(MonitoringTest, PersistenceFailureEvidenceSurvivesEngineRecreationInHistoryAndLog) {
+    const auto log = directory / "diagnostics.log";
+    Monitor monitor({}, log, inputs());
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    MonitoringClient client(channel);
+    monitor.poll();
+    hasWriteFailure = true;
+    now += 1s;
+    monitor.poll();
+    const auto failed = client.read();
+    ASSERT_TRUE(failed.health.lastFailure);
+    EXPECT_EQ(failed.health.lastFailure->message, "Uncommitted tick: disk unavailable");
+    {
+        std::ifstream input(log);
+        std::string line;
+        bool hasFailure = false;
+        while (std::getline(input, line)) {
+            const auto record = nlohmann::json::parse(line);
+            if (record.at("operation") == "save/open") {
+                hasFailure = true;
+                EXPECT_EQ(record.at("source"), "persistence");
+                EXPECT_EQ(record.at("utcMs"), 1000);
+                EXPECT_EQ(record.at("generation"), 1);
+            }
+        }
+        EXPECT_TRUE(hasFailure);
+    }
+    hasWriteFailure = false;
+    now += 1s;
+    monitor.poll();
+    const auto recovered = client.read();
+    EXPECT_EQ(recovered.health.state, MonitoringState::Operating);
+    EXPECT_EQ(recovered.generation, 2u);
+    ASSERT_TRUE(recovered.health.lastFailure);
+    EXPECT_EQ(recovered.health.lastFailure->utcMs, failed.health.lastFailure->utcMs);
+    EXPECT_TRUE(std::any_of(recovered.diagnostics.begin(), recovered.diagnostics.end(),
+        [](const Diagnostic& item) { return item.operation == "save/open" && item.generation == 1; }));
+}
+
+TEST_F(MonitoringTest, RoutineProcessExclusionsDoNotCrowdOutActionableDiagnostics) {
+    pass.system.sample.reset();
+    pass.system.report.operation = sentinel::telemetry::CollectionOperation::GetSystemTimes;
+    pass.system.report.errorCode = ERROR_ACCESS_DENIED;
+    pass.processes.sample.emplace();
+    pass.processes.report.enumerated = 20;
+    pass.processes.report.read = 18;
+    pass.processes.report.skipped = 2;
+    Monitor monitor({}, directory / "diagnostics.log", inputs());
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    MonitoringClient client(channel);
+    monitor.poll();
+    pass.system.report = {};
+    for (int second = 1; second <= 120; ++second) {
+        now += 1s;
+        monitor.poll();
+    }
+    const auto status = client.read();
+    EXPECT_EQ(status.health.processes.report.skipped, 2u);
+    EXPECT_EQ(std::count_if(status.diagnostics.begin(), status.diagnostics.end(),
+        [](const Diagnostic& item) { return item.operation == "coverage"; }), 3);
+    EXPECT_TRUE(std::any_of(status.diagnostics.begin(), status.diagnostics.end(),
+        [](const Diagnostic& item) { return item.source == "system" && item.code == ERROR_ACCESS_DENIED; }));
+}
+
 TEST_F(MonitoringTest, LoggingFailureIsVisibleWithoutHidingPersistenceFailure) {
     Monitor monitor({}, directory, inputs()); // A directory cannot be opened as a log file.
     MonitoringOwner owner([&] { return monitor.read(); }, channel);
@@ -322,6 +563,52 @@ TEST_F(MonitoringTest, LoggingFailureIsVisibleWithoutHidingPersistenceFailure) {
     EXPECT_TRUE(recovered.health.hasLoggingFailure);
     EXPECT_TRUE(recovered.health.lastFailure);
     EXPECT_GT(recovered.diagnostics.size(), failed.diagnostics.size());
+}
+
+TEST_F(MonitoringTest, DatabaseOpenFailureExposesAvailableSqliteCode) {
+    const auto database = directory / "blocked.db";
+    std::filesystem::create_directory(database);
+    Monitor monitor({}, database, directory / "diagnostics.log");
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    monitor.poll();
+    const auto status = MonitoringClient(channel).read();
+    EXPECT_EQ(status.health.state, MonitoringState::Recovering);
+    ASSERT_TRUE(status.health.lastFailure);
+    EXPECT_EQ(status.health.lastFailure->operation, "save/open");
+    EXPECT_EQ(status.health.lastFailure->code, SQLITE_CANTOPEN);
+    EXPECT_FALSE(status.snapshot);
+}
+
+TEST_F(MonitoringTest, MaintenanceFailureExposesAvailableCodeWithoutLosingSavedTelemetry) {
+    struct MaintenanceEngine final : detail::MonitoringEngine {
+        sentinel::storage::SQLiteStore store;
+        explicit MaintenanceEngine(const std::filesystem::path& database)
+            : store(database, 0, [](sentinel::storage::WriteStage stage) {
+                if (stage == sentinel::storage::WriteStage::Maintenance) {
+                    throw sentinel::storage::SQLiteError(SQLITE_IOERR, "injected maintenance I/O failure");
+                }
+            }) {}
+        detail::SamplingPass collect() override {
+            detail::SamplingPass pass;
+            pass.system.sample = sentinel::telemetry::SystemSample{.cpuUsagePercent = 42};
+            return pass;
+        }
+        sentinel::storage::WriteResult save(const detail::PendingTick& tick) override {
+            return store.saveTick(tick.identity, tick.utc, tick.system, tick.processes, tick.anomalies);
+        }
+    };
+    auto runtime = inputs();
+    runtime.createEngine = [&] { return std::make_unique<MaintenanceEngine>(directory / "sentinel.db"); };
+    Monitor monitor({}, directory / "diagnostics.log", std::move(runtime));
+    MonitoringOwner owner([&] { return monitor.read(); }, channel);
+    monitor.poll();
+    const auto status = MonitoringClient(channel).read();
+    EXPECT_EQ(status.health.state, MonitoringState::Operating);
+    ASSERT_TRUE(status.snapshot);
+    EXPECT_EQ(status.snapshot->system->cpuUsagePercent, 42);
+    ASSERT_TRUE(status.health.lastFailure);
+    EXPECT_EQ(status.health.lastFailure->operation, "maintenance");
+    EXPECT_EQ(status.health.lastFailure->code, SQLITE_IOERR);
 }
 
 TEST_F(MonitoringTest, SimultaneousReadersAndDisconnectDoNotOwnMonitoring) {
@@ -458,22 +745,80 @@ TEST_F(MonitoringTest, RealStatusCommandsReadOwnerAndDuplicateStartIsRejected) {
     EXPECT_EQ(MonitoringClient().read().snapshot->sequence, 2u);
 }
 
+TEST_F(MonitoringTest, RealStatusCommandsReadDuringRecoveryAndAfterBudgetExhaustion) {
+    std::unique_ptr<MonitoringOwner> owner;
+    Monitor monitor({}, directory / "diagnostics.log", inputs());
+    try { owner = std::make_unique<MonitoringOwner>([&] { return monitor.read(); }); }
+    catch (const std::runtime_error&) { GTEST_SKIP() << "A monitoring owner already exists"; }
+    MonitoringClient client;
+    monitor.poll();
+    const auto original = client.read();
+    const auto readWithStatusProcesses = [&] {
+        std::vector<std::unique_ptr<ChildProcess>> clients;
+        for (int index = 0; index < 4; ++index) clients.push_back(std::make_unique<ChildProcess>(
+            quote(executableDirectory() / "sentinel.exe") + L" status"));
+        std::vector<std::future<MonitoringStatus>> reads;
+        for (int index = 0; index < 4; ++index) reads.push_back(client.readAsync());
+        for (const auto& process : clients) EXPECT_EQ(process->wait(), 0u);
+        for (auto& read : reads) EXPECT_EQ(read.get().ownerId, original.ownerId);
+    };
+    hasWriteFailure = true;
+    now += 1s;
+    monitor.poll();
+    readWithStatusProcesses();
+    EXPECT_EQ(client.read().health.state, MonitoringState::Recovering);
+    EXPECT_EQ(client.read().snapshot->sequence, original.snapshot->sequence);
+    hasWriteFailure = false;
+    now += 1s;
+    monitor.poll();
+    EXPECT_EQ(client.read().health.state, MonitoringState::Operating);
+    EXPECT_EQ(client.read().snapshot->generation, 2u);
+    readWithStatusProcesses();
+    const auto recovered = client.read();
+    hasWriteFailure = true;
+    now += 1s;
+    monitor.poll();
+    now += 2s;
+    monitor.poll();
+    now += 4s;
+    monitor.poll();
+    readWithStatusProcesses();
+    EXPECT_EQ(client.read().health.state, MonitoringState::Failed);
+    EXPECT_EQ(client.read().snapshot->sequence, recovered.snapshot->sequence);
+}
+
 TEST_F(MonitoringTest, ProductionCliEntryPointStopsOnCtrlCAndCanRestart) {
     try {
         static_cast<void>(MonitoringClient().read());
         GTEST_SKIP() << "A monitoring owner already exists";
     } catch (const ConnectionError&) {}
-    for (int restart = 0; restart < 2; ++restart) {
-        ChildProcess child(quote(executableDirectory() / "sentinel_test_cli.exe") + L" start", true);
+    for (int restart = 0; restart < 3; ++restart) {
+        const bool duringRecovery = restart == 1;
+        ChildProcess child(quote(executableDirectory() / "sentinel_test_cli.exe") + L" start", true,
+            [duringRecovery](DWORD id) {
+                if (duringRecovery) {
+                    std::filesystem::create_directories(std::filesystem::temp_directory_path() /
+                        (L"sentinel-cli-test-" + std::to_wstring(id)) / "sentinel.db");
+                }
+            });
         std::optional<MonitoringStatus> status;
         const auto deadline = std::chrono::steady_clock::now() + 5s;
         while (std::chrono::steady_clock::now() < deadline) {
-            try { status = MonitoringClient().read(); if (status->snapshot) break; }
+            try {
+                status = MonitoringClient().read();
+                if (duringRecovery ? status->health.state == MonitoringState::Recovering :
+                        status->snapshot.has_value()) break;
+            }
             catch (const ConnectionError&) {}
             std::this_thread::sleep_for(10ms);
         }
         ASSERT_TRUE(status);
-        ASSERT_TRUE(status->snapshot);
+        if (duringRecovery) {
+            ASSERT_EQ(status->health.state, MonitoringState::Recovering);
+            EXPECT_FALSE(status->snapshot);
+        } else {
+            ASSERT_TRUE(status->snapshot);
+        }
         ChildProcess reader(quote(executableDirectory() / "sentinel.exe") + L" status");
         EXPECT_EQ(reader.wait(), 0u);
         ChildProcess interrupt(quote(executableDirectory() / "sentinel_test_owner.exe") + L" --interrupt " +

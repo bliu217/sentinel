@@ -59,3 +59,7 @@ The existing process collector smoke check remains enabled.
 
 `persistence_test.cpp` additionally covers stable tick replay after reopen,
 rollback, and failures after commit or during maintenance.
+Regression coverage also checks original SQLite error codes after rollback and
+open failure, diagnostic evidence across engine recreation, throttled process
+exclusion summaries, recovery without savable data, and baseline-only recovery.
+Real status processes read the owner during recovery and after retry exhaustion.

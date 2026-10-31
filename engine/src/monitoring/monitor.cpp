@@ -12,6 +12,7 @@
 #include <fstream>
 #include <mutex>
 #include <random>
+#include <utility>
 
 namespace sentinel::monitoring {
 namespace {
@@ -22,6 +23,7 @@ constexpr std::size_t DIAGNOSTIC_LIMIT = 64;
 constexpr std::uintmax_t LOG_BYTES = 64 * 1024;
 constexpr std::size_t MESSAGE_LIMIT = 2048;
 constexpr std::chrono::seconds STABLE_INTERVAL{60};
+constexpr std::chrono::seconds COVERAGE_INTERVAL{60};
 constexpr std::chrono::seconds RECOVERY_DELAYS[]{std::chrono::seconds(1),
     std::chrono::seconds(2), std::chrono::seconds(4)};
 
@@ -107,10 +109,12 @@ struct Monitor::Impl {
     std::optional<detail::PendingTick> pending;
     std::optional<SteadyClock::time_point> successfulSince;
     std::optional<SteadyClock::time_point> gapStarted;
+    std::optional<SteadyClock::time_point> lastCoverageReport;
     SteadyClock::time_point nextWork{};
     std::uint64_t tickNumber{};
     std::uint64_t sequence{};
     bool hasStarted{false};
+    bool allowRecoveryBaseline{false};
 
     Impl(MonitoringConfig value, std::filesystem::path log, detail::RuntimeInputs runtime)
         : config(std::move(value)), logPath(std::move(log)), inputs(std::move(runtime)),
@@ -170,7 +174,10 @@ struct Monitor::Impl {
             report("processes", operationName(pass.processes.report.operation), "Collection failed",
                 pass.processes.report.errorCode, true);
         }
-        if (pass.processes.report.skipped != 0) {
+        const auto now = inputs.steadyNow();
+        if (pass.processes.report.skipped != 0 &&
+                (!lastCoverageReport || now - *lastCoverageReport >= COVERAGE_INTERVAL)) {
+            lastCoverageReport = now;
             report("processes", "coverage", "Enumerated " + std::to_string(pass.processes.report.enumerated) +
                 "; read " + std::to_string(pass.processes.report.read) + "; skipped " +
                 std::to_string(pass.processes.report.skipped));
@@ -217,7 +224,7 @@ struct Monitor::Impl {
         publishPending();
         if (!result.error.empty()) report("persistence", "reconcile", result.error, result.code, true);
         if (!result.maintenanceError.empty()) {
-            report("persistence", "maintenance", result.maintenanceError, {}, true);
+            report("persistence", "maintenance", result.maintenanceError, result.maintenanceCode, true);
         }
         return true;
     }
@@ -244,6 +251,10 @@ struct Monitor::Impl {
     void collectPass() {
         const detail::SamplingPass pass = engine->collect();
         updateCollection(pass);
+        const bool isRecoveryBaseline = std::exchange(allowRecoveryBaseline, false) &&
+            (pass.system.report.isBaseline || pass.processes.report.isBaseline) &&
+            pass.system.report.operation == telemetry::CollectionOperation::None &&
+            pass.processes.report.operation == telemetry::CollectionOperation::None;
         detail::PendingTick tick;
         tick.identity = status.ownerId + ":" + std::to_string(++tickNumber);
         tick.generation = status.generation;
@@ -262,7 +273,13 @@ struct Monitor::Impl {
                     tick.processes ? &*tick.processes : nullptr));
             }
         }
-        if (!tick.system && !tick.processes) { successfulSince.reset(); return; }
+        if (!tick.system && !tick.processes) {
+            successfulSince.reset();
+            if (status.health.state == MonitoringState::Recovering && !isRecoveryBaseline) {
+                scheduleRecovery("Recovery produced no savable sampling pass");
+            }
+            return;
+        }
         pending = std::move(tick);
         if (savePending()) finishSuccessfulPass();
     }
@@ -291,10 +308,13 @@ struct Monitor::Impl {
                     report("owner", "start", "Monitoring started");
                 }
                 engine = inputs.createEngine();
+                allowRecoveryBaseline = status.health.state == MonitoringState::Recovering;
                 // Reconcile the original pending identity before collecting in the new generation.
                 if (pending && !savePending()) return;
             }
             collectPass();
+        } catch (const storage::SQLiteError& error) {
+            scheduleRecovery(error.what(), error.code());
         } catch (const std::exception& error) {
             scheduleRecovery(error.what());
         }

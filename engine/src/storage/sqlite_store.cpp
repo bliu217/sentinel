@@ -14,14 +14,10 @@ namespace {
 
 using Clock = std::chrono::system_clock;
 
-class SqliteError : public std::runtime_error {
+class SqliteError : public SQLiteError {
 public:
     SqliteError(sqlite3* db, const std::string& operation)
-        : std::runtime_error(operation + ": " + sqlite3_errmsg(db)), code_(sqlite3_errcode(db)) {}
-    [[nodiscard]] int code() const noexcept { return code_; }
-
-private:
-    int code_;
+        : SQLiteError(sqlite3_errcode(db), operation + ": " + sqlite3_errmsg(db)) {}
 };
 
 class Statement {
@@ -133,10 +129,11 @@ SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxByt
     }
     std::filesystem::create_directories(path.parent_path());
     if (sqlite3_open16(path.c_str(), &db_) != SQLITE_OK) {
+        const int code = db_ != nullptr ? sqlite3_errcode(db_) : SQLITE_NOMEM;
         const std::string detail = db_ != nullptr ? sqlite3_errmsg(db_) : "open failed";
         sqlite3_close(db_);
         db_ = nullptr;
-        throw std::runtime_error("Open SQLite database: " + detail);
+        throw SQLiteError(code, "Open SQLite database: " + detail);
     }
     try {
         execute(db_, "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA auto_vacuum=INCREMENTAL;");
@@ -281,7 +278,11 @@ WriteResult SQLiteStore::saveTick(const std::string& identity, Clock::time_point
         }
     } catch (const std::exception& error) {
         result.error = error.what();
-        result.code = sqlite3_errcode(db_);
+        // Cleanup and receipt reads can replace SQLite's connection error state.
+        // The exception captured the code at the failing operation.
+        if (const auto* sqliteError = dynamic_cast<const SQLiteError*>(&error)) {
+            result.code = sqliteError->code();
+        }
         try {
             // A failed COMMIT may still have committed. Reconcile the receipt before publishing.
             if (sqlite3_get_autocommit(db_) == 0) throw std::runtime_error("Rollback unresolved");
@@ -298,6 +299,9 @@ WriteResult SQLiteStore::saveTick(const std::string& identity, Clock::time_point
         enforceCap();
     } catch (const std::exception& error) {
         result.maintenanceError = error.what();
+        if (const auto* sqliteError = dynamic_cast<const SQLiteError*>(&error)) {
+            result.maintenanceCode = sqliteError->code();
+        }
     }
     return result;
 }
