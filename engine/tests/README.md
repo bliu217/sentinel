@@ -41,3 +41,18 @@ Disable tests at configure time with `-DSENTINEL_BUILD_TESTS=OFF`.
 - **FILETIME:** high/low `DWORD`s combine as `(high << 32) | low`.
 - **CPU %:** Windows kernel time includes idle, so `busy = Δkernel + Δuser − Δidle` and `total = Δkernel + Δuser`.
 - **Guards:** `total == 0` → 0%; times going backwards → 0%; usage clamped to `[0, 100]`.
+
+## Shared monitoring tests
+
+`monitoring_test.cpp` exercises the typed client over real same-user Windows named
+pipes. Controlled external collection, persistence, and clock inputs cover source
+health, saved-only publication, stale snapshots, retry timing and exhaustion,
+budget replenishment, bounded diagnostics, log rotation/failure, concurrent reads,
+pipe access policy, and cooperative shutdown. A separate `sentinel_test_owner`
+fixture proves process independence and cleanup. Real `sentinel status` processes
+and duplicate `sentinel start` rejection are exercised without opening the user's
+telemetry database. The production endpoint test skips if an owner already exists.
+The existing process collector smoke check remains enabled.
+
+`persistence_test.cpp` additionally covers stable tick replay after reopen,
+rollback, and failures after commit or during maintenance.

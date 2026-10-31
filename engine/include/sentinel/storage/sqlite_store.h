@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -14,6 +15,17 @@
 struct sqlite3;
 
 namespace sentinel::storage {
+
+enum class CommitOutcome { Committed, Uncommitted, Unresolved };
+enum class WriteStage { BeforeCommit, AfterCommit, Maintenance };
+
+/** A maintenance error never changes a known committed outcome. */
+struct WriteResult {
+    CommitOutcome outcome{CommitOutcome::Uncommitted};
+    std::string error;
+    std::optional<int> code;
+    std::string maintenanceError;
+};
 
 struct StoredAnomaly {
     std::int64_t id{};
@@ -35,10 +47,18 @@ struct StoredTick {
 
 class SQLiteStore {
 public:
-    explicit SQLiteStore(const std::filesystem::path& path, std::uint64_t maxBytes = 2ULL * 1024 * 1024 * 1024);
+    explicit SQLiteStore(const std::filesystem::path& path, std::uint64_t maxBytes = 2ULL * 1024 * 1024 * 1024,
+        std::function<void(WriteStage)> writeCheckpoint = {});
     ~SQLiteStore();
     SQLiteStore(const SQLiteStore&) = delete;
     SQLiteStore& operator=(const SQLiteStore&) = delete;
+
+    /** Save or reconcile one stable identity, including across connection reopen. */
+    [[nodiscard]] WriteResult saveTick(const std::string& identity,
+        std::chrono::system_clock::time_point tickUtc,
+        const std::optional<telemetry::SystemSample>& system,
+        const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
+        const std::vector<attribution::AnomalyEvent>& anomalies);
 
     void writeTick(
         std::chrono::system_clock::time_point tickUtc,
@@ -60,7 +80,7 @@ private:
     [[nodiscard]] bool deleteOldest(std::int64_t count);
     [[nodiscard]] std::uint64_t allocatedBytes() const;
     void writeTickOnce(
-        std::chrono::system_clock::time_point tickUtc,
+        const std::string& identity, std::chrono::system_clock::time_point tickUtc,
         const std::optional<telemetry::SystemSample>& system,
         const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
         const std::vector<attribution::AnomalyEvent>& anomalies);
@@ -68,6 +88,7 @@ private:
     sqlite3* db_{};
     std::uint64_t maxBytes_{};
     std::string storeId_;
+    std::function<void(WriteStage)> writeCheckpoint_;
 };
 
 class RetentionManager {

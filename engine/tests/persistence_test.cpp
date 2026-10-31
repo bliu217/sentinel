@@ -92,6 +92,46 @@ public:
 
 }  // namespace
 
+TEST(SQLiteStore, ReplayingStableIdentityAfterReopenKeepsOneTickAndAnomaly) {
+    TemporaryDirectory directory;
+    const auto database = directory.path / "sentinel.db";
+    {
+        sentinel::storage::SQLiteStore store(database);
+        const auto result = store.saveTick("owner:1", at(12), system(12),
+            selectedProcessGroups(12), {attributedEvent(12, 10)});
+        EXPECT_EQ(result.outcome, sentinel::storage::CommitOutcome::Committed);
+    }
+    sentinel::storage::SQLiteStore reopened(database);
+    EXPECT_EQ(reopened.saveTick("owner:1", at(12), system(12),
+        selectedProcessGroups(12), {attributedEvent(12, 10)}).outcome,
+        sentinel::storage::CommitOutcome::Committed);
+    const auto ticks = reopened.readTicks(at(10), at(14));
+    ASSERT_EQ(ticks.size(), 1u);
+    EXPECT_EQ(ticks.front().anomalies.size(), 1u);
+    ASSERT_TRUE(ticks.front().processContext);
+    EXPECT_EQ(ticks.front().processContext->groups.size(), 2u);
+}
+
+TEST(SQLiteStore, ReportsRollbackAndReconcilesFailureAfterCommit) {
+    TemporaryDirectory directory;
+    const auto database = directory.path / "sentinel.db";
+    for (const auto stage : {sentinel::storage::WriteStage::BeforeCommit,
+            sentinel::storage::WriteStage::AfterCommit, sentinel::storage::WriteStage::Maintenance}) {
+        sentinel::storage::SQLiteStore store(database, 0, [stage](auto actual) {
+            if (actual == stage) throw std::runtime_error("injected write failure");
+        });
+        const auto result = store.saveTick("tick", at(12), system(12), std::nullopt, {event(12, 10)});
+        EXPECT_EQ(result.outcome, stage == sentinel::storage::WriteStage::BeforeCommit
+            ? sentinel::storage::CommitOutcome::Uncommitted : sentinel::storage::CommitOutcome::Committed);
+        if (stage == sentinel::storage::WriteStage::Maintenance) EXPECT_FALSE(result.maintenanceError.empty());
+    }
+    sentinel::storage::SQLiteStore reopened(database);
+    EXPECT_EQ(reopened.countTicks(), 1);
+    EXPECT_EQ(reopened.saveTick("tick", at(12), system(12), std::nullopt, {event(12, 10)}).outcome,
+        sentinel::storage::CommitOutcome::Committed);
+    EXPECT_EQ(reopened.readTicks(at(10), at(14)).front().anomalies.size(), 1u);
+}
+
 TEST(SQLiteStore, PersistsSelectedProcessGroupsAndEventTimingAcrossRestart) {
     TemporaryDirectory directory;
     const auto database = directory.path / "sentinel.db";

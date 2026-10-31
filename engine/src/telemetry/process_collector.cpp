@@ -95,18 +95,29 @@ private:
 }  // namespace
 
 std::optional<ProcessSnapshot> ProcessCollector::collect() {
+    return collectDetailed().sample;
+}
+
+CollectionResult<ProcessSnapshot> ProcessCollector::collectDetailed() {
     // Serialize reads and baseline updates so concurrent callers preserve counter order.
     std::lock_guard lock(mutex_);
 
+    CollectionResult<ProcessSnapshot> result;
+    result.report.attemptedAt = std::chrono::system_clock::now();
     std::vector<DWORD> processIds(1024);
     DWORD bytesReturned{};
     for (;;) {
         const DWORD bufferBytes = static_cast<DWORD>(processIds.size() * sizeof(DWORD));
-        if (EnumProcesses(processIds.data(), bufferBytes, &bytesReturned) == 0) return std::nullopt;
+        if (EnumProcesses(processIds.data(), bufferBytes, &bytesReturned) == 0) {
+            result.report.operation = CollectionOperation::EnumerateProcesses;
+            result.report.errorCode = GetLastError();
+            return result;
+        }
         if (bytesReturned < bufferBytes) break;
         processIds.resize(processIds.size() * 2);
     }
 
+    result.report.enumerated = bytesReturned / sizeof(DWORD);
     std::vector<RawProcessObservation> observations;
     std::vector<wchar_t> imagePath(1024);
     for (std::size_t index = 0; index < bytesReturned / sizeof(DWORD); ++index) {
@@ -116,12 +127,22 @@ std::optional<ProcessSnapshot> ProcessCollector::collect() {
         }
     }
 
+    result.report.read = observations.size();
+    result.report.skipped = result.report.enumerated - result.report.read;
     std::uint64_t systemCpuTime{};
     if (!readSystemCpuTime(systemCpuTime)) {
-        return std::nullopt;
+        result.report.operation = CollectionOperation::GetSystemTimes;
+        result.report.errorCode = GetLastError();
+        return result;
     }
     const SampleTime time{std::chrono::steady_clock::now(), std::chrono::system_clock::now()};
-    return tracker_.update(time, systemCpuTime, std::move(observations));
+    result.sample = tracker_.update(time, systemCpuTime, std::move(observations));
+    result.report.hasCpuBaseline = true;
+    for (const ProcessSample& process : result.sample->processes) {
+        if (!process.cpuUsagePercent) result.report.hasCpuBaseline = false;
+    }
+    result.report.isBaseline = !result.report.hasCpuBaseline;
+    return result;
 }
 
 }  // namespace sentinel::telemetry

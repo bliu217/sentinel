@@ -32,37 +32,51 @@ namespace {
 }  // namespace
 
 std::optional<SystemSample> SystemCollector::collect() {
+    return collectDetailed().sample;
+}
+
+CollectionResult<SystemSample> SystemCollector::collectDetailed() {
     // Keep the Win32 readings and baseline update in the same order across callers.
     std::lock_guard lock(mutex_);
 
+    CollectionResult<SystemSample> result;
+    result.report.attemptedAt = std::chrono::system_clock::now();
+    result.report.hasCpuBaseline = previousCpu_.has_value();
     RawCpuSample cpu{};
     if (!readCpuTimes(cpu)) {
-        return std::nullopt;
+        result.report.operation = CollectionOperation::GetSystemTimes;
+        result.report.errorCode = GetLastError();
+        return result;
     }
 
     std::uint64_t memoryUsed = 0;
     std::uint64_t memoryAvailable = 0;
     if (!readMemory(memoryUsed, memoryAvailable)) {
-        return std::nullopt;
+        result.report.operation = CollectionOperation::GlobalMemoryStatusEx;
+        result.report.errorCode = GetLastError();
+        return result;
     }
 
     const SampleTime time{std::chrono::steady_clock::now(), std::chrono::system_clock::now()};
 
     if (!previousCpu_.has_value()) {
         previousCpu_ = cpu;
-        return std::nullopt;
+        result.report.isBaseline = true;
+        result.report.hasCpuBaseline = true;
+        return result;
     }
 
     const double usage = cpuUsagePercent(*previousCpu_, cpu);
     previousCpu_ = cpu;
 
-    return SystemSample{
+    result.sample = SystemSample{
         .timestamp = time.steady,
         .cpuUsagePercent = usage,
         .memoryUsedBytes = memoryUsed,
         .memoryAvailableBytes = memoryAvailable,
         .utcTimestamp = time.utc,
     };
+    return result;
 }
 
 }  // namespace sentinel::telemetry

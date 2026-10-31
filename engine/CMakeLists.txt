@@ -1,4 +1,5 @@
 add_library(sentinel_engine STATIC
+    src/monitoring/monitor.cpp
     src/paths.cpp
     src/telemetry/system_collector.cpp
     src/telemetry/process_collector.cpp
@@ -15,19 +16,20 @@ add_library(sentinel_engine STATIC
 target_include_directories(sentinel_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(sentinel_engine PUBLIC sentinel_sqlite nlohmann_json::nlohmann_json)
 if(WIN32)
-    target_link_libraries(sentinel_engine PUBLIC Psapi Shell32 Ole32)
+    target_link_libraries(sentinel_engine PUBLIC Psapi Shell32 Ole32 Advapi32)
 endif()
+
+# The reusable client has no SQLite/collector dependency.
+add_library(sentinel_client STATIC src/monitoring/status_codec.cpp src/monitoring/pipe_transport.cpp)
+target_include_directories(sentinel_client PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(sentinel_client PUBLIC nlohmann_json::nlohmann_json Advapi32)
 
 if(MSVC)
-    target_compile_options(sentinel_engine PUBLIC /W4 /permissive-)
-    target_compile_definitions(sentinel_engine PUBLIC
-        UNICODE
-        _UNICODE
-        WIN32_LEAN_AND_MEAN
-        NOMINMAX
-    )
+    foreach(target sentinel_engine sentinel_client)
+        target_compile_options(${target} PUBLIC /W4 /permissive-)
+        target_compile_definitions(${target} PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endforeach()
 endif()
-
 
 # Preserve the existing library target for downstream CMake users.
 add_library(sentinel_telemetry ALIAS sentinel_engine)

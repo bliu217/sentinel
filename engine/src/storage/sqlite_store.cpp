@@ -125,7 +125,9 @@ void execute(sqlite3* db, const char* sql) {
 
 }  // namespace
 
-SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxBytes) : maxBytes_(maxBytes) {
+SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxBytes,
+    std::function<void(WriteStage)> writeCheckpoint)
+    : maxBytes_(maxBytes), writeCheckpoint_(std::move(writeCheckpoint)) {
     if (maxBytes != 0 && maxBytes < 64 * 1024) {
         throw std::invalid_argument("SQLite size cap must be at least 64 KiB");
     }
@@ -139,11 +141,22 @@ SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxByt
     try {
         execute(db_, "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA auto_vacuum=INCREMENTAL;");
         execute(db_, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;");
+        execute(db_, "BEGIN IMMEDIATE");
         execute(db_, "CREATE TABLE IF NOT EXISTS ticks ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, utc_ms INTEGER NOT NULL, system_utc_ms INTEGER,"
             "cpu_percent REAL, memory_used_bytes INTEGER, memory_available_bytes INTEGER,"
             "process_utc_ms INTEGER);");
         execute(db_, "CREATE INDEX IF NOT EXISTS ticks_utc ON ticks(utc_ms,id);");
+        bool hasIdentity = false;
+        {
+            Statement columns(db_, "PRAGMA table_info(ticks)");
+            while (columns.stepRow()) {
+                const char* name = reinterpret_cast<const char*>(sqlite3_column_text(columns.get(), 1));
+                if (std::string(name) == "replay_identity") hasIdentity = true;
+            }
+        }
+        if (!hasIdentity) execute(db_, "ALTER TABLE ticks ADD COLUMN replay_identity TEXT");
+        execute(db_, "CREATE UNIQUE INDEX IF NOT EXISTS ticks_identity ON ticks(replay_identity)");
         execute(db_, "CREATE TABLE IF NOT EXISTS tick_process_groups ("
             "tick_id INTEGER NOT NULL REFERENCES ticks(id) ON DELETE CASCADE,"
             "group_order INTEGER NOT NULL, group_name TEXT NOT NULL, cpu_percent REAL,"
@@ -162,7 +175,20 @@ SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxByt
             "group_order INTEGER NOT NULL, group_name TEXT NOT NULL, cpu_percent REAL,"
             "working_set_bytes INTEGER NOT NULL, private_bytes INTEGER NOT NULL,"
             "process_count INTEGER NOT NULL, PRIMARY KEY(anomaly_id,group_order));");
-        execute(db_, "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+        execute(db_, "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;");
+        bool hasRowIdMetadata = false;
+        {
+            Statement schema(db_, "SELECT sql FROM sqlite_master WHERE name='metadata'");
+            if (schema.stepRow()) {
+                const std::string sql = reinterpret_cast<const char*>(sqlite3_column_text(schema.get(), 0));
+                hasRowIdMetadata = sql.find("WITHOUT ROWID") == std::string::npos;
+            }
+        }
+        if (hasRowIdMetadata) {
+            execute(db_, "CREATE TABLE metadata_compact(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;"
+                "INSERT INTO metadata_compact SELECT key,value FROM metadata; DROP TABLE metadata;"
+                "ALTER TABLE metadata_compact RENAME TO metadata;");
+        }
         {
             Statement readId(db_, "SELECT value FROM metadata WHERE key='store_id'");
             if (readId.stepRow()) {
@@ -174,6 +200,8 @@ SQLiteStore::SQLiteStore(const std::filesystem::path& path, std::uint64_t maxByt
                 insertId.stepDone();
             }
         }
+        execute(db_, "COMMIT");
+        execute(db_, "PRAGMA incremental_vacuum");
         if (maxBytes_ != 0) {
             const std::uint64_t pages = maxBytes_ / static_cast<std::uint64_t>(scalar(db_, "PRAGMA page_size;"));
             const std::string cap = "PRAGMA max_page_count=" + std::to_string(pages) + ";";
@@ -196,51 +224,91 @@ void SQLiteStore::writeTick(
     const std::optional<telemetry::SystemSample>& system,
     const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
     const std::vector<attribution::AnomalyEvent>& anomalies) {
-    std::uint64_t estimatedBytes = 512 + 128 * anomalies.size();
-    if (processContext) {
-        for (const telemetry::ProcessGroup& group : processContext->groups) {
-            estimatedBytes += 128 + group.name.size() * 4;
+    const WriteResult result = saveTick(newStoreId(), tickUtc, system, processContext, anomalies);
+    if (result.outcome != CommitOutcome::Committed) throw std::runtime_error(result.error);
+}
+
+WriteResult SQLiteStore::saveTick(const std::string& identity, Clock::time_point tickUtc,
+    const std::optional<telemetry::SystemSample>& system,
+    const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
+    const std::vector<attribution::AnomalyEvent>& anomalies) {
+    WriteResult result;
+    try {
+        if (identity.empty()) throw std::invalid_argument("Tick identity must not be empty");
+        Statement existing(db_, "SELECT id FROM ticks WHERE replay_identity=?1");
+        existing.bind(1, identity);
+        if (existing.stepRow()) {
+            result.outcome = CommitOutcome::Committed;
+        } else {
+            std::uint64_t estimatedBytes = 512 + 128 * anomalies.size();
+            if (processContext) {
+                for (const telemetry::ProcessGroup& group : processContext->groups) {
+                    estimatedBytes += 128 + group.name.size() * 4;
+                }
+            }
+            for (const attribution::AnomalyEvent& anomaly : anomalies) {
+                if (!anomaly.processContext) continue;
+                for (const telemetry::ProcessGroup& group : anomaly.processContext->groups) {
+                    estimatedBytes += 128 + group.name.size() * 4;
+                }
+            }
+            if (maxBytes_ != 0 && estimatedBytes > maxBytes_ / 2) {
+                throw std::runtime_error("A single tick is too large for the SQLite size cap");
+            }
+            for (;;) {
+                execute(db_, "BEGIN IMMEDIATE;");
+                try {
+                    writeTickOnce(identity, tickUtc, system, processContext, anomalies);
+                    if (writeCheckpoint_) writeCheckpoint_(WriteStage::BeforeCommit);
+                    execute(db_, "COMMIT;");
+                    result.outcome = CommitOutcome::Committed;
+                    if (writeCheckpoint_) writeCheckpoint_(WriteStage::AfterCommit);
+                    break;
+                } catch (const SqliteError& error) {
+                    if (sqlite3_get_autocommit(db_) == 0) {
+                        try { execute(db_, "ROLLBACK;"); } catch (...) {}
+                    }
+                    const std::int64_t count = countTicks();
+                    if (error.code() != SQLITE_FULL || count <= 1 ||
+                        !deleteOldest(std::min<std::int64_t>(256, count - 1))) throw;
+                } catch (...) {
+                    if (sqlite3_get_autocommit(db_) == 0) {
+                        try { execute(db_, "ROLLBACK;"); } catch (...) {}
+                    }
+                    throw;
+                }
+            }
         }
-    }
-    for (const attribution::AnomalyEvent& anomaly : anomalies) {
-        if (!anomaly.processContext) continue;
-        for (const telemetry::ProcessGroup& group : anomaly.processContext->groups) {
-            estimatedBytes += 128 + group.name.size() * 4;
-        }
-    }
-    if (maxBytes_ != 0 && estimatedBytes > maxBytes_ / 2) {
-        throw std::runtime_error("A single tick is too large for the SQLite size cap");
-    }
-    for (;;) {
-        execute(db_, "BEGIN IMMEDIATE;");
+    } catch (const std::exception& error) {
+        result.error = error.what();
+        result.code = sqlite3_errcode(db_);
         try {
-            writeTickOnce(tickUtc, system, processContext, anomalies);
-            execute(db_, "COMMIT;");
-            break;
-        } catch (const SqliteError& error) {
-            if (sqlite3_get_autocommit(db_) == 0) {
-                try { execute(db_, "ROLLBACK;"); } catch (...) {}
-            }
-            const std::int64_t count = countTicks();
-            if (error.code() != SQLITE_FULL || count <= 1 ||
-                !deleteOldest(std::min<std::int64_t>(256, count - 1))) throw;
+            // A failed COMMIT may still have committed. Reconcile the receipt before publishing.
+            if (sqlite3_get_autocommit(db_) == 0) throw std::runtime_error("Rollback unresolved");
+            Statement receipt(db_, "SELECT id FROM ticks WHERE replay_identity=?1");
+            receipt.bind(1, identity);
+            result.outcome = receipt.stepRow() ? CommitOutcome::Committed : CommitOutcome::Uncommitted;
         } catch (...) {
-            if (sqlite3_get_autocommit(db_) == 0) {
-                try { execute(db_, "ROLLBACK;"); } catch (...) {}
-            }
-            throw;
+            result.outcome = CommitOutcome::Unresolved;
         }
     }
-    enforceCap();
+    if (result.outcome != CommitOutcome::Committed) return result;
+    try {
+        if (writeCheckpoint_) writeCheckpoint_(WriteStage::Maintenance);
+        enforceCap();
+    } catch (const std::exception& error) {
+        result.maintenanceError = error.what();
+    }
+    return result;
 }
 
 void SQLiteStore::writeTickOnce(
-    Clock::time_point tickUtc,
+    const std::string& identity, Clock::time_point tickUtc,
     const std::optional<telemetry::SystemSample>& system,
     const std::optional<telemetry::ProcessGroupSnapshot>& processContext,
     const std::vector<attribution::AnomalyEvent>& anomalies) {
         Statement tick(db_, "INSERT INTO ticks(utc_ms,system_utc_ms,cpu_percent,memory_used_bytes,"
-            "memory_available_bytes,process_utc_ms) VALUES(?1,?2,?3,?4,?5,?6)");
+            "memory_available_bytes,process_utc_ms,replay_identity) VALUES(?1,?2,?3,?4,?5,?6,?7)");
         tick.bind(1, millis(tickUtc));
         if (system) {
             tick.bind(2, millis(system->utcTimestamp));
@@ -249,6 +317,7 @@ void SQLiteStore::writeTickOnce(
             tick.bind(5, static_cast<std::int64_t>(system->memoryAvailableBytes));
         }
         if (processContext) tick.bind(6, millis(processContext->time.utc));
+        tick.bind(7, identity);
         tick.stepDone();
         const std::int64_t tickId = sqlite3_last_insert_rowid(db_);
         Statement processGroup(db_, "INSERT INTO tick_process_groups VALUES(?1,?2,?3,?4,?5,?6,?7)");

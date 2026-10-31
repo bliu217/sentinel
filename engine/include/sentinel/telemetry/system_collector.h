@@ -2,6 +2,7 @@
 
 #include "cpu_math.h"
 #include "sample_time.h"
+#include "collection_result.h"
 
 #include <chrono>
 #include <cstdint>
@@ -21,6 +22,8 @@ struct SystemSample {
 class SystemCollector {
 public:
     [[nodiscard]] std::optional<SystemSample> collect();
+    /** Distinguish baseline warmup from a failed Windows operation. */
+    [[nodiscard]] CollectionResult<SystemSample> collectDetailed();
 
 private:
     std::mutex mutex_;

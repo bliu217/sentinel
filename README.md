@@ -99,13 +99,42 @@ The build fetches pinned SQLite 3.46.1 and nlohmann/json 3.11.3 sources. Network
 
 ```bat
 build\sentinel.exe start
+build\sentinel.exe status
 build\sentinel.exe start --max-db-size-mib 4096
 build\sentinel.exe archive create cursor-investigation --name "Cursor lag investigation"
 build\sentinel.exe archive add cursor-investigation --from 2026-09-24T18:00:00Z --to 2026-09-24T19:00:00Z --app cursor.exe --events cpu,memory,collection-lag --include-samples
 ```
 
-Sentinel stores runtime data under `%LOCALAPPDATA%\Sentinel\`, using Windows known folders rather than an environment variable lookup. `sentinel.db` holds system samples, selected process groups, and anomaly events, and `exports\` is reserved for runtime exports. Existing per-PID rows from older versions remain readable. Startup removes records older than 30 days; a 2 GiB default database cap may remove older records sooner. The `--max-db-size-mib` option changes that cap for a monitoring run. If a tick cannot be saved, monitoring stops with an error.
+Sentinel stores runtime data under `%LOCALAPPDATA%\Sentinel\`, using Windows known folders rather than an environment variable lookup. `sentinel.db` holds system samples, selected process groups, and anomaly events, and `exports\` is reserved for runtime exports. Existing per-PID rows from older versions remain readable. Startup removes records older than 30 days; a 2 GiB default database cap may remove older records sooner. The `--max-db-size-mib` option changes that cap for a monitoring run. Persistence failures pause collection and trigger up to three engine recovery attempts after 1, 2, and 4 seconds. The budget replenishes after 60 seconds of successful persistence. Exhaustion leaves the owner reachable in `Failed` until Ctrl+C and an explicit restart.
 
 `archive create` makes a permanent project folder under the Windows Documents known folder at `Sentinel\investigations\`. `archive add` copies records from the half-open UTC range `[from, to)` into `anomalies.jsonl` and, when requested, `samples.jsonl`. Repeating the same selection does not duplicate records. Application names match case-insensitively. An anomaly record contains its captured process groups, while a sample record contains the selected process groups for that tick. An application filter selects matching groups; known executable names such as `cursor.exe` also match their group names. System samples remain in the chosen range. The manifest records project metadata, contents, and committed file lengths so an interrupted append can be repaired on the next add. Archives are not pruned with SQLite. Automatic archive rules and generated project READMEs are future work.
 
 See [engine/tests/README.md](engine/tests/README.md) for how tests are organized and how to run them.
+
+## Shared monitoring owner and client
+
+`sentinel start` owns monitoring for the current Windows user. A second owner is
+rejected, and closing a status client does not stop monitoring. Ctrl+C stops the
+owner cooperatively, including during recovery backoff.
+
+`sentinel status` returns versioned JSON through a local named pipe restricted to
+the same user. It includes current health, bounded recent diagnostics, and the
+latest saved sampling pass (or `snapshot: null` during startup). System and process
+sources are optional independently; older process values are never substituted.
+Owner identity, monitoring generation, sequence, and UTC timestamps distinguish
+repeated snapshots, stale evidence, recovery, and whole-owner restarts. Monotonic
+collector timestamps stay within the owner and are not transmitted.
+
+C++ consumers link `sentinel_client` and include `sentinel/monitoring/client.h`.
+`MonitoringClient::read()` returns independent typed values; `readAsync()` returns
+a future for use away from a UI thread. `ConnectionError` means transport failed;
+a reachable owner reports monitoring failures through `MonitoringStatus::health`.
+Neither operation starts or stops the owner. GUI and MCP integration remain future work.
+
+The engine's reusable `Monitor` owns orchestration, history, attribution, and
+persistence. Replay uses a stable identity saved transactionally with each tick;
+commit outcome and post-commit maintenance errors are reported separately.
+Existing database history and archive operations remain compatible.
+Diagnostics are also written independently of SQLite to
+`%LOCALAPPDATA%\Sentinel\diagnostics.log` as JSONL, with at most three 64 KiB files
+and 64 recent records in client responses. Logging errors remain visible in health.

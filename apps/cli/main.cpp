@@ -1,15 +1,7 @@
-#include "sentinel/attribution/anomaly_event.h"
-#include "sentinel/detection/anomaly_detector.h"
-#include "sentinel/monitoring_config.h"
+#include "sentinel/monitoring/client.h"
 #include "sentinel/paths.h"
-#include "sentinel/storage/event_store.h"
 #include "sentinel/storage/archive_manager.h"
-#include "sentinel/storage/process_history.h"
-#include "sentinel/storage/ring_buffer.h"
 #include "sentinel/storage/sqlite_store.h"
-#include "sentinel/telemetry/process_aggregator.h"
-#include "sentinel/telemetry/process_collector.h"
-#include "sentinel/telemetry/system_collector.h"
 
 #include <atomic>
 #include <chrono>
@@ -39,6 +31,7 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
 void printUsage() {
     std::cerr << "Usage:\n"
               << "  sentinel start [--max-db-size-mib N]\n"
+              << "  sentinel status\n"
               << "  sentinel archive create SLUG --name NAME\n"
               << "  sentinel archive add SLUG --from UTC --to UTC [--app EXE]... "
                  "[--events cpu,memory,collection-lag] [--include-samples]\n";
@@ -181,44 +174,18 @@ void printUsage() {
     if (SetConsoleCtrlHandler(onConsoleCtrl, TRUE) == 0) {
         throw std::runtime_error("Failed to register console control handler");
     }
+    sentinel::monitoring::Monitor monitor(config, sentinel::paths::databasePath(),
+        sentinel::paths::localDataDirectory() / "diagnostics.log");
+    sentinel::monitoring::MonitoringOwner owner([&monitor] { return monitor.read(); });
     std::filesystem::create_directories(sentinel::paths::localDataDirectory());
     std::filesystem::create_directories(sentinel::paths::exportsDirectory());
-    sentinel::storage::SQLiteStore database(sentinel::paths::databasePath(),
-        config.maxDatabaseSizeMiB * 1024 * 1024);
-    sentinel::storage::RetentionManager retention(database, config.retentionPeriod);
-    retention.pruneOnStartup(std::chrono::system_clock::now());
-    sentinel::telemetry::SystemCollector collector;
-    sentinel::telemetry::ProcessCollector processCollector;
-    sentinel::storage::RingBuffer samples(config.inMemoryHistorySize);
-    sentinel::storage::ProcessHistory processHistory(config.inMemoryHistorySize);
-    sentinel::detection::AnomalyDetector detector;
-    sentinel::storage::EventStore eventStore(&database);
-    using Clock = std::chrono::steady_clock;
-    auto nextTick = Clock::now();
+    std::jthread worker([&monitor](std::stop_token stop) { monitor.run(stop); });
     while (g_running.load(std::memory_order_relaxed)) {
-        const auto tickUtc = std::chrono::system_clock::now();
-        const auto sample = collector.collect();
-        const auto processSnapshot = processCollector.collect();
-        if (sample) samples.push(*sample);
-        std::optional<sentinel::telemetry::ProcessGroupSnapshot> selectedProcessGroups;
-        if (processSnapshot) {
-            selectedProcessGroups = sentinel::telemetry::selectProcessGroups(
-                sentinel::telemetry::aggregateProcesses(*processSnapshot),
-                config.topProcessGroupsPerMetric, config.pinnedProcessGroups);
-            processHistory.push(*selectedProcessGroups);
-        }
-        if (sample) {
-            const sentinel::telemetry::SampleTime observedAt{sample->timestamp, sample->utcTimestamp};
-            for (auto& detection : detector.analyze(*sample)) {
-                eventStore.append(sentinel::attribution::attachProcessContext(
-                    std::move(detection), observedAt,
-                    selectedProcessGroups ? &*selectedProcessGroups : nullptr));
-            }
-        }
-        if (sample || selectedProcessGroups) eventStore.commitTick(tickUtc, sample, selectedProcessGroups);
-        nextTick += config.sampleInterval;
-        std::this_thread::sleep_until(nextTick);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    worker.request_stop();
+    worker.join();
+    SetConsoleCtrlHandler(onConsoleCtrl, FALSE);
     return 0;
 }
 
@@ -228,6 +195,11 @@ int main(int argc, char* argv[]) {
     try {
         if (argc >= 2 && std::string_view(argv[1]) == "start") {
             return startCommand(argc, argv);
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "status") {
+            std::cout << sentinel::monitoring::serializeStatus(
+                sentinel::monitoring::MonitoringClient().read()) << '\n';
+            return 0;
         }
         if (argc >= 2 && std::string_view(argv[1]) == "archive") {
             return archiveCommand(argc, argv);
