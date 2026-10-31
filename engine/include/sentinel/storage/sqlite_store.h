@@ -9,12 +9,22 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 struct sqlite3;
 
 namespace sentinel::storage {
+
+/** Preserve the SQLite result code when opening or maintaining a store throws. */
+class SQLiteError : public std::runtime_error {
+public:
+    SQLiteError(int code, const std::string& message) : std::runtime_error(message), code_(code) {}
+    [[nodiscard]] int code() const noexcept { return code_; }
+private:
+    int code_;
+};
 
 enum class CommitOutcome { Committed, Uncommitted, Unresolved };
 enum class WriteStage { BeforeCommit, AfterCommit, Maintenance };
@@ -25,6 +35,7 @@ struct WriteResult {
     std::string error;
     std::optional<int> code;
     std::string maintenanceError;
+    std::optional<int> maintenanceCode;
 };
 
 struct StoredAnomaly {

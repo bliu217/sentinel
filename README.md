@@ -138,3 +138,7 @@ Existing database history and archive operations remain compatible.
 Diagnostics are also written independently of SQLite to
 `%LOCALAPPDATA%\Sentinel\diagnostics.log` as JSONL, with at most three 64 KiB files
 and 64 recent records in client responses. Logging errors remain visible in health.
+Current process coverage counts remain available on every pass; routine exclusion
+diagnostics are summarized at most once per minute. Recovery permits one
+baseline-only warmup pass per recreated engine, then requires a newly saved pass
+or advances through the remaining retry budget.

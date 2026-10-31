@@ -132,6 +132,23 @@ TEST(SQLiteStore, ReportsRollbackAndReconcilesFailureAfterCommit) {
     EXPECT_EQ(reopened.readTicks(at(10), at(14)).front().anomalies.size(), 1u);
 }
 
+TEST(SQLiteStore, RetainsOriginalSqliteFailureCodeAfterRollback) {
+    TemporaryDirectory directory;
+    const auto database = directory.path / "sentinel.db";
+    sentinel::storage::SQLiteStore store(database);
+    sqlite3* connection = nullptr;
+    ASSERT_EQ(sqlite3_open16(database.c_str(), &connection), SQLITE_OK);
+    const int setup = sqlite3_exec(connection,
+        "CREATE TRIGGER reject_tick BEFORE INSERT ON ticks BEGIN "
+        "SELECT RAISE(ABORT, 'injected constraint failure'); END;", nullptr, nullptr, nullptr);
+    sqlite3_close(connection);
+    ASSERT_EQ(setup, SQLITE_OK);
+    const auto result = store.saveTick("rejected", at(12), system(12), std::nullopt, {});
+    EXPECT_EQ(result.outcome, sentinel::storage::CommitOutcome::Uncommitted);
+    EXPECT_EQ(result.code, SQLITE_CONSTRAINT);
+    EXPECT_TRUE(store.readTicks(at(10), at(14)).empty());
+}
+
 TEST(SQLiteStore, PersistsSelectedProcessGroupsAndEventTimingAcrossRestart) {
     TemporaryDirectory directory;
     const auto database = directory.path / "sentinel.db";
